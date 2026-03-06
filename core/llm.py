@@ -82,33 +82,27 @@ def _claude(model: str, system: str, messages: list[dict],
 
 def _gemini(model: str, system: str, messages: list[dict],
             max_tokens: int, temperature: float) -> str:
-    import google.generativeai as genai
-    genai.configure(api_key=GEMINI_API_KEY)
+    from google import genai
+    from google.genai import types
 
-    gen_config = {
-        "max_output_tokens": max_tokens,
-        "temperature": temperature,
-    }
+    client = genai.Client(api_key=GEMINI_API_KEY)
 
-    client = genai.GenerativeModel(
-        model_name=model,
-        system_instruction=system,
-        generation_config=gen_config,
+    # Convert messages to Gemini Content format
+    contents = [
+        types.Content(
+            role="user" if m["role"] == "user" else "model",
+            parts=[types.Part(text=m["content"])]
+        )
+        for m in messages
+    ]
+
+    response = client.models.generate_content(
+        model=model,
+        contents=contents,
+        config=types.GenerateContentConfig(
+            system_instruction=system,
+            max_output_tokens=max_tokens,
+            temperature=temperature,
+        ),
     )
-
-    # Convert to Gemini format
-    history = []
-    last_message = None
-    for msg in messages:
-        role = "user" if msg["role"] == "user" else "model"
-        if msg is messages[-1] and role == "user":
-            last_message = msg["content"]
-        else:
-            history.append({"role": role, "parts": [msg["content"]]})
-
-    if last_message is None:
-        last_message = messages[-1]["content"]
-
-    convo = client.start_chat(history=history)
-    response = convo.send_message(last_message)
     return response.text

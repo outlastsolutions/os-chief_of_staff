@@ -133,14 +133,14 @@ Return JSON with exactly these fields:
     # Store acceptance criteria as a director report scaffold
     _store_scoping(conn, request_id, scoping)
 
-    transition_request(conn, request_id, Role.PM, RequestState.SCOPED)
+    final = transition_request(conn, request_id, Role.PM, RequestState.SCOPED)
 
     _log(conn, "pm", "request:scoped", request_id=request_id, data=scoping)
 
     # Queue Slack notification
-    _notify_slack(conn, request_id, updated["title"], scoping)
+    _notify_slack(conn, request_id, final["title"], scoping)
 
-    return updated
+    return final
 
 
 def get_backlog(conn, status: Optional[str] = None,
