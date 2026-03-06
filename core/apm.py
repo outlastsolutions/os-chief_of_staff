@@ -389,11 +389,11 @@ def _notify_slack(conn, request_id: str, title: str, tasks: list[dict]) -> None:
         f"*{title}*\n"
         f"{len(tasks)} tasks created:\n{task_lines}"
     )
-    enqueue_outbox(conn,
-        dedupe_key=f"slack:apm:decomposed:{request_id}",
-        type_="slack_post",
-        payload={"channel": SLACK_TASKS_CHANNEL, "text": text}
-    )
+    try:
+        from core.secretary_client import notify
+        notify(SLACK_TASKS_CHANNEL, text, agent="apm")
+    except Exception as e:
+        print(f"  [apm] Slack notify skipped (Secretary unavailable): {e}")
 
 
 def _log(conn, role: str, action: str, request_id: Optional[str] = None,

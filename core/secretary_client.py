@@ -55,9 +55,21 @@ def call_tool(name: str, input: dict[str, Any] = None) -> dict:
 
 # ── Convenience wrappers ───────────────────────────────────────────────────
 
-def post_slack(channel: str, text: str, unit: str = "outlast") -> dict:
-    """Post a Slack message via Secretary."""
-    return call_tool("slack_post", {"channel": channel, "text": text, "unit": unit})
+def post_slack(channel: str, text: str,
+               username: str = None, icon_emoji: str = None,
+               thread_ts: str = None) -> dict:
+    """Post a Slack message via Secretary.
+    username overrides the display name (e.g. 'Builder', 'Chief of Staff').
+    icon_emoji sets the avatar (e.g. ':robot_face:', ':briefcase:').
+    """
+    payload = {"channel": channel, "text": text}
+    if username:
+        payload["username"] = username
+    if icon_emoji:
+        payload["icon_emoji"] = icon_emoji
+    if thread_ts:
+        payload["thread_ts"] = thread_ts
+    return call_tool("slack_post_message", payload)
 
 
 def send_slack_dm(user_id: str, text: str) -> dict:
@@ -105,3 +117,39 @@ def work_request(action: str, payload: dict = None,
     if note:
         body["note"] = note
     return _request("POST", "/work/", body)
+
+
+# ── Agent Slack identities ─────────────────────────────────────────────────
+# Standard username/icon_emoji pairs for each OSAIO agent.
+# Pass these to post_slack() so messages are identifiable in Slack.
+
+AGENT_IDENTITY = {
+    "pm":        {"username": "Chief of Staff · PM",      "icon_emoji": ":briefcase:"},
+    "apm":       {"username": "Chief of Staff · APM",     "icon_emoji": ":clipboard:"},
+    "planner":   {"username": "Planner",                  "icon_emoji": ":pencil:"},
+    "builder":   {"username": "Builder",                  "icon_emoji": ":hammer:"},
+    "auditor":   {"username": "Auditor",                  "icon_emoji": ":white_check_mark:"},
+    "secretary": {"username": "Secretary",                "icon_emoji": ":envelope:"},
+}
+
+
+def notify(channel: str, text: str, agent: str = "pm",
+           thread_ts: str = None, task_id: str = None) -> dict:
+    """
+    Post a Slack notification via Secretary with the correct agent identity.
+    agent: one of pm | apm | planner | builder | auditor | secretary
+    """
+    identity = AGENT_IDENTITY.get(agent, {"username": agent.title(), "icon_emoji": ":robot_face:"})
+    return work_request(
+        action="slack_post_message",
+        payload={
+            "channel": channel,
+            "text": text,
+            "username": identity["username"],
+            "icon_emoji": identity["icon_emoji"],
+            **({"thread_ts": thread_ts} if thread_ts else {}),
+        },
+        task_id=task_id,
+        source=agent,
+        note=f"Notification from {agent}",
+    )

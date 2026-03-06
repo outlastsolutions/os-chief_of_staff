@@ -232,11 +232,11 @@ def _notify_slack(conn, request_id: str, title: str, scoping: dict) -> None:
         f"*Acceptance criteria:*\n{criteria}"
         f"{ambi_text}"
     )
-    enqueue_outbox(conn,
-        dedupe_key=f"slack:pm:scoped:{request_id}",
-        type_="slack_post",
-        payload={"channel": SLACK_TASKS_CHANNEL, "text": text}
-    )
+    try:
+        from core.secretary_client import notify
+        notify(SLACK_TASKS_CHANNEL, text, agent="pm")
+    except Exception as e:
+        print(f"  [pm] Slack notify skipped (Secretary unavailable): {e}")
 
 
 def _notify_slack_status(conn, request_id: str, title: str,
@@ -247,11 +247,11 @@ def _notify_slack_status(conn, request_id: str, title: str,
         f"*{title}*"
         + (f"\n{detail}" if detail else "")
     )
-    enqueue_outbox(conn,
-        dedupe_key=f"slack:pm:{status}:{request_id}",
-        type_="slack_post",
-        payload={"channel": SLACK_TASKS_CHANNEL, "text": text}
-    )
+    try:
+        from core.secretary_client import notify
+        notify(SLACK_TASKS_CHANNEL, text, agent="pm")
+    except Exception as e:
+        print(f"  [pm] Slack notify skipped (Secretary unavailable): {e}")
 
 
 def _log(conn, role: str, action: str, request_id: Optional[str] = None,
