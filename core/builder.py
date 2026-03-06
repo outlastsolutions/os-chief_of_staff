@@ -34,21 +34,25 @@ from core.lease import (
 
 
 BUILDER_SYSTEM = """You are the Builder Agent for Outlast Solutions LLC.
-Given a task plan, produce an execution manifest: for each step, the exact
-content, command, or code to execute.
+You execute one plan step at a time. For each step you are given:
+- The step details (tool, description, resource, expected output)
+- Results from all previous steps
+
+Produce the exact content to execute for the current step only.
 
 Rules:
-- Be precise and literal. The manifest is executed directly.
-- For file_edit steps: provide the full file content to write.
-- For code_run steps: provide the exact Python code to run.
-- For shell steps: provide the exact shell command.
-- For web_search steps: provide the exact search query string.
-- For docs_api steps: provide the document title and content.
-- For none/thinking steps: provide a brief note (no tool action needed).
-- Do NOT include markdown code fences in file content or code.
-- Paths should be relative to the workspace root unless absolute is required.
+- Be precise and literal. Your output is executed directly.
+- file_edit: provide the full file content to write (no markdown fences).
+- code_run: provide executable Python code only (no shell commands, no markdown).
+- shell: provide the exact shell command string.
+- web_search: provide the exact search query string.
+- docs_api: provide {"title": "...", "content": "..."}.
+- none: provide a brief note (nothing is executed).
+- Use results from previous steps to inform your output — adapt if something failed.
+- File paths must be relative to the workspace root.
 
-Respond with valid JSON only."""
+Respond with valid JSON only:
+{"tool": "...", "resource": "path or query or n/a", "content": "exact content to execute", "reason": "one line why"}"""
 
 
 # ── Public interface ──────────────────────────────────────────────────────
@@ -74,8 +78,7 @@ def execute_task(conn, agent_id: str,
         if not plan:
             raise ValueError("Task has no plan. Run planner first.")
 
-        manifest = _generate_manifest(task, plan, dod)
-        artifacts, logs = _execute_manifest(conn, tid, agent_id, manifest, plan)
+        artifacts, logs = _execute_steps(conn, tid, agent_id, task, plan, dod)
 
         report = _create_report(conn, tid, agent_id, "completed", artifacts, logs)
         release_to_verifying(conn, tid, agent_id)
@@ -163,113 +166,121 @@ def _load_plan_and_dod(conn, task_id: str) -> tuple[Optional[dict], dict]:
     return plan, dod
 
 
-# ── Manifest generation (single LLM call) ─────────────────────────────────
+# ── Per-step execution (one LLM call per step) ───────────────────────────
 
-def _generate_manifest(task: dict, plan: dict, dod: dict) -> list[dict]:
+def _execute_steps(conn, task_id: str, agent_id: str,
+                   task: dict, plan: dict, dod: dict) -> tuple[list, list]:
     """
-    One LLM call: given all plan steps, produce exact execution content for each.
-    Returns a list of manifest steps with 'action' and 'content' fields added.
+    Execute each plan step with its own LLM call.
+    Previous step results are fed as context so the Builder can adapt.
     """
     steps = plan["steps"]
     if isinstance(steps, str):
         steps = json.loads(steps)
 
-    steps_text = "\n".join(
-        f"{s['order']}. [{s['tool']}] {s['title']}\n"
-        f"   Description: {s['description']}\n"
-        f"   Resource: {s.get('resource', 'n/a')}"
-        for s in steps
+    artifacts    = []
+    logs         = []
+    history      = []   # running LLM conversation for context
+    step_results = []   # previous step outcomes for context
+
+    # Seed the conversation with task context
+    task_context = (
+        f"Task: {task['title']}\n"
+        f"Description: {task['description']}\n"
+        f"Complexity: {task['complexity']}\n"
+        f"Test strategy: {plan.get('test_strategy', '')}\n"
+        f"Total steps: {len(steps)}"
     )
+    history.append({"role": "user", "content": task_context})
+    history.append({"role": "assistant", "content": '{"acknowledged": true}'})
 
-    prompt = f"""Task: {task['title']}
-Description: {task['description']}
-Complexity: {task['complexity']}
+    for step in steps:
+        tool_hint = step.get("tool", "none")
+        order     = step.get("order", "?")
 
-Plan steps to execute:
-{steps_text}
+        # Build per-step prompt with previous results as context
+        prev_context = ""
+        if step_results:
+            prev_context = "\nPrevious step results:\n" + "\n".join(
+                f"  Step {r['order']}: [{r['tool']}] {r['status']} — {r['summary']}"
+                for r in step_results
+            )
 
-Test strategy: {plan.get('test_strategy', 'verify each step output')}
+        step_prompt = (
+            f"Execute step {order} of {len(steps)}:{prev_context}\n\n"
+            f"Step {order}: [{tool_hint}] {step['title']}\n"
+            f"Description: {step['description']}\n"
+            f"Resource: {step.get('resource', 'n/a')}\n"
+            f"Expected output: {step.get('expected_output', '')}\n"
+            f"Risk: {step.get('risk', 'low')}"
+        )
 
-For each step, provide the exact execution content.
-Return JSON:
-{{
-  "manifest": [
-    {{
-      "order": 1,
-      "tool": "file_edit|code_run|shell|web_search|docs_api|none",
-      "resource": "path/to/file or search query or 'n/a'",
-      "content": "exact file content, code, command, or search query",
-      "description": "one line summary of what this does"
-    }}
-  ]
-}}"""
+        history.append({"role": "user", "content": step_prompt})
 
-    result = chat_json(
-        model=BUILDER_MODEL,
-        system=BUILDER_SYSTEM,
-        messages=[{"role": "user", "content": prompt}],
-        max_tokens=8192,
-    )
-    return result.get("manifest", [])
+        action = chat_json(
+            model=BUILDER_MODEL,
+            system=BUILDER_SYSTEM,
+            messages=history,
+            max_tokens=4096,
+        )
 
+        history.append({"role": "assistant", "content": json.dumps(action)})
 
-# ── Step execution ────────────────────────────────────────────────────────
+        tool     = action.get("tool", tool_hint)
+        resource = action.get("resource", step.get("resource", "n/a"))
+        content  = action.get("content", "")
+        log_entry = f"Step {order}: [{tool}] {step['title']}"
 
-def _execute_manifest(conn, task_id: str, agent_id: str,
-                      manifest: list[dict], plan: dict) -> tuple[list, list]:
-    artifacts = []
-    logs      = []
-
-    for step in manifest:
-        tool     = step.get("tool", "none")
-        resource = step.get("resource", "n/a")
-        content  = step.get("content", "")
-        desc     = step.get("description", "")
-
-        # Check budget before each tool call
+        # Budget check
         if tool != "none":
             within_budget = increment_tool_calls(conn, task_id)
             if not within_budget:
                 raise RuntimeError(
-                    f"Tool budget exceeded at step {step.get('order')}. "
-                    "Task blocked — APM will escalate."
+                    f"Tool budget exceeded at step {order}. Task blocked."
                 )
 
-        log_entry = f"Step {step.get('order')}: [{tool}] {desc}"
         print(f"    {log_entry}")
 
         try:
             if tool == "file_edit":
-                result = _tool_file_edit(resource, content)
+                exec_result = _tool_file_edit(resource, content)
                 artifacts.append({"type": "file", "path": resource})
 
             elif tool == "code_run":
-                result = _tool_code_run(content)
+                exec_result = _tool_code_run(content)
                 artifacts.append({"type": "code_output", "path": resource,
-                                   "output": result[:500]})
+                                   "output": exec_result[:500]})
 
             elif tool == "shell":
-                result = _tool_shell(content)
+                exec_result = _tool_shell(content)
                 artifacts.append({"type": "shell_output", "command": content,
-                                   "output": result[:500]})
+                                   "output": exec_result[:500]})
 
             elif tool == "web_search":
-                result = _tool_web_search(content or resource)
+                exec_result = _tool_web_search(content or resource)
                 artifacts.append({"type": "research", "query": content,
-                                   "snippet": result[:300]})
+                                   "snippet": exec_result[:500]})
 
             elif tool == "docs_api":
-                result = f"[docs_api] would create/update doc: {resource}"
+                exec_result = f"[docs_api] would create/update doc: {resource}"
 
             elif tool == "none":
-                result = f"[note] {content[:100]}"
+                exec_result = f"[note] {content[:200]}"
 
             else:
-                result = f"[unknown tool: {tool}]"
+                exec_result = f"[unknown tool: {tool}] — skipped"
 
-            logs.append(f"✓ {log_entry} → {str(result)[:120]}")
+            step_results.append({
+                "order": order, "tool": tool,
+                "status": "ok", "summary": str(exec_result)[:150]
+            })
+            logs.append(f"✓ {log_entry} → {str(exec_result)[:120]}")
 
         except Exception as e:
+            step_results.append({
+                "order": order, "tool": tool,
+                "status": "error", "summary": str(e)[:150]
+            })
             logs.append(f"✗ {log_entry} → ERROR: {e}")
             raise
 
