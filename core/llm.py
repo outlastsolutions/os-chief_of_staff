@@ -58,8 +58,14 @@ def chat_json(model: str, system: str, messages: list[dict],
 
     try:
         return json.loads(raw)
-    except json.JSONDecodeError as e:
-        raise ValueError(f"LLM returned invalid JSON: {e}\n\nRaw response:\n{raw}")
+    except json.JSONDecodeError:
+        # Attempt automatic repair for common LLM JSON issues (missing brackets, trailing commas, etc.)
+        from json_repair import repair_json
+        repaired = repair_json(raw)
+        try:
+            return json.loads(repaired)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"LLM returned invalid JSON (repair failed): {e}\n\nRaw response:\n{raw}")
 
 
 # ── Claude ────────────────────────────────────────────────────────────────
