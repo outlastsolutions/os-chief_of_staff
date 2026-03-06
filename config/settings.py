@@ -22,3 +22,7 @@ AUDITOR_MODEL = os.getenv("AUDITOR_MODEL", "gemini-2.5-flash")
 # ── Slack ─────────────────────────────────────────────────────────────────
 SLACK_BOT_TOKEN   = os.getenv("SLACK_BOT_TOKEN", "")
 SLACK_TASKS_CHANNEL = os.getenv("SLACK_TASKS_CHANNEL", "C0AJL6RCYKU")
+
+# ── Secretary integration ─────────────────────────────────────────────────
+SECRETARY_URL     = os.getenv("SECRETARY_URL", "http://localhost:8000")
+SECRETARY_API_KEY = os.getenv("SECRETARY_API_KEY", "")
