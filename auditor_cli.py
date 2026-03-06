@@ -10,12 +10,11 @@ import json
 from db.connection import transaction
 from core.auditor import verify_task, get_verification_report
 
-RESET = "\033[0m"
-BOLD  = "\033[1m"
-GREEN = "\033[92m"
-RED   = "\033[91m"
-YELLOW = "\033[93m"
-DIM   = "\033[2m"
+RESET  = "\033[0m"
+BOLD   = "\033[1m"
+GREEN  = "\033[92m"
+RED    = "\033[91m"
+DIM    = "\033[2m"
 
 
 def cmd_verify(task_id: str):
@@ -62,27 +61,25 @@ def _print_report(report: dict):
     criteria = checks.get("criteria", []) if isinstance(checks, dict) else []
     summary  = checks.get("summary", "") if isinstance(checks, dict) else ""
 
-    print(f"
-{BOLD}Verification Report{RESET} — {report['report_id']}")
+    print(f"\n{BOLD}Verification Report{RESET} — {report['report_id']}")
     print(f"Task:    {report['task_id']}")
     print(f"Verdict: {verdict_color}{verdict.upper()}{RESET}")
     print(f"Auditor: {report['verifier']}")
-    print(f"Summary: {summary}
-")
+    print(f"Summary: {summary}\n")
 
     if criteria:
         print(f"{BOLD}Criteria:{RESET}")
         for c in criteria:
-            icon  = f"{GREEN}✓{RESET}" if c.get("result") == "pass" else f"{RED}✗{RESET}"
-            print(f"  {icon} {c.get('criterion','')[:80]}")
+            icon = f"{GREEN}✓{RESET}" if c.get("result") == "pass" else f"{RED}✗{RESET}"
+            print(f"  {icon} {c.get('criterion', '')[:80]}")
             if c.get("reason"):
                 print(f"     {DIM}{c['reason'][:100]}{RESET}")
 
     if issues:
-        print(f"
-{BOLD}{RED}Issues:{RESET}")
+        print(f"\n{BOLD}{RED}Issues:{RESET}")
         for issue in issues:
             print(f"  • {issue}")
+
 
 if __name__ == "__main__":
     args = sys.argv[1:]
