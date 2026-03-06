@@ -95,8 +95,8 @@ check("builder: executing → verifying",
 check("auditor: verifying → done",
       lambda: validate_task_transition(Role.AUDITOR, TaskState.VERIFYING, TaskState.DONE))
 
-check("auditor: verifying → executing (fail path)",
-      lambda: validate_task_transition(Role.AUDITOR, TaskState.VERIFYING, TaskState.EXECUTING))
+check("auditor: verifying → planned (fail path — re-queue for builder retry)",
+      lambda: validate_task_transition(Role.AUDITOR, TaskState.VERIFYING, TaskState.PLANNED))
 
 check("pm: any → blocked",
       lambda: validate_task_transition(Role.PM, TaskState.EXECUTING, TaskState.BLOCKED))
@@ -105,9 +105,9 @@ should_raise("builder cannot go planned → done",
              TransitionError,
              lambda: validate_task_transition(Role.BUILDER, TaskState.PLANNED, TaskState.DONE))
 
-should_raise("auditor cannot go verifying → planned (no plan churn)",
+should_raise("auditor cannot go verifying → executing (old fail path removed)",
              TransitionError,
-             lambda: validate_task_transition(Role.AUDITOR, TaskState.VERIFYING, TaskState.PLANNED))
+             lambda: validate_task_transition(Role.AUDITOR, TaskState.VERIFYING, TaskState.EXECUTING))
 
 should_raise("executor cannot bypass to done",
              TransitionError,
@@ -199,15 +199,17 @@ def test_builder_moves_to_verifying():
 
 check("builder moves executing → verifying", test_builder_moves_to_verifying)
 
-def test_auditor_fails_back_to_executing():
+def test_auditor_fails_back_to_planned():
     with transaction() as conn:
-        t = transition_task(conn, task_id, Role.AUDITOR, TaskState.EXECUTING)
-        assert t["status"] == TaskState.EXECUTING
+        t = transition_task(conn, task_id, Role.AUDITOR, TaskState.PLANNED)
+        assert t["status"] == TaskState.PLANNED
 
-check("auditor moves verifying → executing (fail path)", test_auditor_fails_back_to_executing)
+check("auditor moves verifying → planned (fail path)", test_auditor_fails_back_to_planned)
 
 def test_auditor_passes_to_done():
-    # Re-advance to verifying first
+    # Re-advance to verifying first (planned → executing → verifying)
+    with transaction() as conn:
+        transition_task(conn, task_id, Role.PLANNER, TaskState.EXECUTING)
     with transaction() as conn:
         transition_task(conn, task_id, Role.BUILDER, TaskState.VERIFYING)
     with transaction() as conn:

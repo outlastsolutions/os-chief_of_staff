@@ -65,7 +65,7 @@ def plan_task(conn, task_id: str) -> dict:
     if existing:
         return dict(existing)
 
-    prompt = _build_plan_prompt(task, dod)
+    prompt = _build_plan_prompt(task, dod, task.get("blocked_reason") or "")
 
     result = chat_json(
         model=PLANNER_MODEL,
@@ -142,7 +142,7 @@ def _load_task_with_dod(conn, task_id: str) -> tuple[dict, dict]:
     return dict(task), dod
 
 
-def _build_plan_prompt(task: dict, dod: dict) -> str:
+def _build_plan_prompt(task: dict, dod: dict, prior_issues: str = "") -> str:
     tools = _parse_json(task.get("tools_allowed", "[]"))
     deps  = _parse_json(task.get("dependencies", "[]"))
 
@@ -173,7 +173,7 @@ Definition of Done:
   Security checks:
 {security or '  (none)'}
 
-Return JSON in exactly this format:
+{f"Previous attempt failed. Auditor issues to resolve:{chr(10)}{prior_issues}{chr(10)}" if prior_issues else ""}Return JSON in exactly this format:
 {{
   "steps": [
     {{

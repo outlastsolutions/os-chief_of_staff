@@ -69,8 +69,8 @@ TASK_TRANSITIONS: dict[str, dict[str, list[str]]] = {
         TaskState.EXECUTING: [TaskState.VERIFYING, TaskState.BLOCKED],
     },
     Role.AUDITOR: {
-        TaskState.VERIFYING: [TaskState.DONE, TaskState.EXECUTING],
-        # DONE = pass, EXECUTING = fail (return to builder with issues, NOT back to planned)
+        TaskState.VERIFYING: [TaskState.DONE, TaskState.PLANNED],
+        # DONE = pass, PLANNED = fail (re-queue for any builder to retry with issues noted)
     },
     Role.PM: {
         # PM can move anything to done/blocked/cancelled

@@ -73,12 +73,14 @@ def execute_task(conn, agent_id: str,
     tid = task["task_id"]
     print(f"  [builder:{agent_id}] claimed {tid} — {task['title']}")
 
+    workspace = _workspace_dir(tid)
+
     try:
         plan, dod = _load_plan_and_dod(conn, tid)
         if not plan:
             raise ValueError("Task has no plan. Run planner first.")
 
-        artifacts, logs = _execute_steps(conn, tid, agent_id, task, plan, dod)
+        artifacts, logs = _execute_steps(conn, tid, agent_id, task, plan, dod, workspace)
 
         report = _create_report(conn, tid, agent_id, "completed", artifacts, logs)
         release_to_verifying(conn, tid, agent_id)
@@ -170,11 +172,36 @@ def _load_plan_and_dod(conn, task_id: str) -> tuple[Optional[dict], dict]:
 
 # ── Per-step execution (one LLM call per step) ───────────────────────────
 
+def _workspace_dir(task_id: str) -> str:
+    """
+    Create and return a per-task workspace directory.
+    Initialised as a git repo so builder can run git commands inside it.
+    """
+    path = os.path.join(os.path.abspath(os.getcwd()), "tmp", "workspace", task_id)
+    os.makedirs(path, exist_ok=True)
+    # Init git repo if not already done
+    git_dir = os.path.join(path, ".git")
+    if not os.path.exists(git_dir):
+        subprocess.run(
+            ["git", "init"],
+            cwd=path, capture_output=True
+        )
+        subprocess.run(
+            ["git", "commit", "--allow-empty", "-m", "init workspace"],
+            cwd=path, capture_output=True,
+            env={**os.environ, "GIT_AUTHOR_NAME": "Builder", "GIT_AUTHOR_EMAIL": "builder@osaio",
+                 "GIT_COMMITTER_NAME": "Builder", "GIT_COMMITTER_EMAIL": "builder@osaio"}
+        )
+    return path
+
+
 def _execute_steps(conn, task_id: str, agent_id: str,
-                   task: dict, plan: dict, dod: dict) -> tuple[list, list]:
+                   task: dict, plan: dict, dod: dict,
+                   workspace: str) -> tuple[list, list]:
     """
     Execute each plan step with its own LLM call.
     Previous step results are fed as context so the Builder can adapt.
+    All file writes and shell commands are scoped to the workspace directory.
     """
     steps = plan["steps"]
     if isinstance(steps, str):
@@ -191,7 +218,8 @@ def _execute_steps(conn, task_id: str, agent_id: str,
         f"Description: {task['description']}\n"
         f"Complexity: {task['complexity']}\n"
         f"Test strategy: {plan.get('test_strategy', '')}\n"
-        f"Total steps: {len(steps)}"
+        f"Total steps: {len(steps)}\n"
+        f"Workspace directory: {workspace} — all file paths are relative to this directory"
     )
     history.append({"role": "user", "content": task_context})
     history.append({"role": "assistant", "content": '{"acknowledged": true}'})
@@ -228,9 +256,9 @@ def _execute_steps(conn, task_id: str, agent_id: str,
 
         history.append({"role": "assistant", "content": json.dumps(action)})
 
-        tool     = action.get("tool", tool_hint)
-        resource = action.get("resource", step.get("resource", "n/a"))
-        content  = action.get("content", "")
+        tool     = action.get("tool", tool_hint) or "none"
+        resource = action.get("resource", step.get("resource", "n/a")) or "n/a"
+        content  = action.get("content") or ""
         log_entry = f"Step {order}: [{tool}] {step['title']}"
 
         # Budget check
@@ -245,16 +273,16 @@ def _execute_steps(conn, task_id: str, agent_id: str,
 
         try:
             if tool == "file_edit":
-                exec_result = _tool_file_edit(resource, content)
+                exec_result = _tool_file_edit(resource, content, workspace)
                 artifacts.append({"type": "file", "path": resource, "preview": content[:1200]})
 
             elif tool == "code_run":
-                exec_result = _tool_code_run(content)
+                exec_result = _tool_code_run(content, workspace=workspace)
                 artifacts.append({"type": "code_output", "path": resource,
                                    "output": exec_result[:1000]})
 
             elif tool == "shell":
-                exec_result = _tool_shell(content)
+                exec_result = _tool_shell(content, workspace=workspace)
                 artifacts.append({"type": "shell_output", "command": content,
                                    "output": exec_result[:1000]})
 
@@ -291,21 +319,26 @@ def _execute_steps(conn, task_id: str, agent_id: str,
 
 # ── Tool handlers ─────────────────────────────────────────────────────────
 
-def _tool_file_edit(path: str, content: str) -> str:
+def _tool_file_edit(path: str, content: str, workspace: str) -> str:
     if not path or path in ("n/a", "N/A", ""):
         raise ValueError("file_edit requires a valid path.")
-    # Restrict writes to safe locations (workspace only, no system paths)
-    abs_path = os.path.abspath(path)
-    cwd = os.path.abspath(os.getcwd())
-    if not abs_path.startswith(cwd):
+    # Always resolve relative to workspace
+    if not os.path.isabs(path):
+        abs_path = os.path.join(workspace, path)
+    else:
+        abs_path = path
+    # Restrict writes to workspace only
+    if not os.path.abspath(abs_path).startswith(workspace):
         raise PermissionError(f"file_edit: path '{path}' is outside workspace.")
-    os.makedirs(os.path.dirname(abs_path), exist_ok=True) if os.path.dirname(abs_path) else None
+    parent = os.path.dirname(abs_path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
     with open(abs_path, "w") as f:
         f.write(content)
     return f"Written {len(content)} chars to {path}"
 
 
-def _tool_code_run(code: str, timeout: int = 15) -> str:
+def _tool_code_run(code: str, timeout: int = 15, workspace: str = None) -> str:
     """Run Python code in a subprocess. Captures stdout+stderr.
     If content looks like a shell invocation rather than Python code, runs as shell."""
     code = code.strip()
@@ -319,11 +352,12 @@ def _tool_code_run(code: str, timeout: int = 15) -> str:
         "def " not in code
     )
     if looks_like_shell:
-        return _tool_shell(code, timeout)
+        return _tool_shell(code, timeout, workspace=workspace)
 
     result = subprocess.run(
         ["python3", "-c", code],
-        capture_output=True, text=True, timeout=timeout
+        capture_output=True, text=True, timeout=timeout,
+        cwd=workspace,
     )
     output = (result.stdout + result.stderr).strip()
     if result.returncode != 0:
@@ -331,14 +365,15 @@ def _tool_code_run(code: str, timeout: int = 15) -> str:
     return output or "(no output)"
 
 
-def _tool_shell(command: str, timeout: int = 15) -> str:
-    """Run a shell command. Captures stdout+stderr."""
+def _tool_shell(command: str, timeout: int = 30, workspace: str = None) -> str:
+    """Run a shell command from within workspace. Captures stdout+stderr."""
     # Normalize python → python3 on systems without a `python` alias
     command = command.replace("python ", "python3 ").replace("python\n", "python3\n")
     if command.strip() == "python":
         command = "python3"
     result = subprocess.run(
-        command, shell=True, capture_output=True, text=True, timeout=timeout
+        command, shell=True, capture_output=True, text=True, timeout=timeout,
+        cwd=workspace,
     )
     output = (result.stdout + result.stderr).strip()
     if result.returncode != 0:

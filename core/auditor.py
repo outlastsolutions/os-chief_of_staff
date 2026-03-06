@@ -102,7 +102,7 @@ def verify_task(conn, agent_id: str,
         else:
             issues_str = "; ".join(verdict.get("issues", []))
             _transition_back_to_builder(conn, tid, agent_id, issues_str)
-            print(f"  [auditor:{agent_id}] {tid} → FAIL → executing (issues: {issues_str[:80]})")
+            print(f"  [auditor:{agent_id}] {tid} → FAIL → planned (issues: {issues_str[:80]})")
 
         return vrep
 
@@ -203,6 +203,20 @@ def _load_plan(conn, task_id: str) -> dict:
 
 # ── Verification ───────────────────────────────────────────────────────────
 
+def _format_artifact(a: dict) -> str:
+    """Format a single artifact for the auditor's verification prompt."""
+    atype   = a.get("type", "?")
+    path    = a.get("path") or a.get("command") or a.get("query") or "n/a"
+    # File artifacts store content in 'preview'; others use 'output'
+    content = a.get("preview") or a.get("output") or a.get("snippet") or ""
+    header  = f"    - [{atype}] {path}"
+    if content:
+        # Include up to 800 chars so the LLM can actually see what was written
+        snippet = content[:800].replace("\n", "\n      ")
+        return f"{header}\n      ```\n      {snippet}\n      ```"
+    return header
+
+
 def _run_verification(task: dict, report: dict, dod: dict, plan: dict) -> dict:
     artifacts = report.get("artifacts", [])
     logs      = report.get("logs", [])
@@ -241,7 +255,7 @@ Definition of Done:
 
 Execution Report (status: {report['status']}):
   Artifacts:
-{chr(10).join(f'    - [{a.get("type","?")}] {a.get("path") or a.get("command") or a.get("query","")}' + (f': {a.get("output","")[:120]}' if a.get("output") else '') for a in artifacts) or '    (none)'}
+{chr(10).join(_format_artifact(a) for a in artifacts) or '    (none)'}
   Log:
 {chr(10).join(f'    {line}' for line in logs) or '    (none)'}
 
@@ -280,16 +294,20 @@ def _transition_done(conn, task_id: str, agent_id: str) -> None:
 
 
 def _transition_back_to_builder(conn, task_id: str, agent_id: str, issues: str) -> None:
-    """Return task to executing state so Builder can retry with issues noted."""
+    """Return task to planned so any builder can retry with audit issues noted."""
     with conn.cursor() as cur:
+        # Delete old plan so planner produces a fresh one informed by audit issues
+        cur.execute("DELETE FROM plans WHERE task_id = %s", (task_id,))
         cur.execute(
             """
             UPDATE tasks
-            SET status = 'executing',
-                leased_by = NULL,
-                leased_until = NULL,
-                blocked_reason = %s,
-                updated_at = NOW()
+            SET status          = 'planned',
+                leased_by       = NULL,
+                leased_until    = NULL,
+                blocked_reason  = %s,
+                plan_id         = NULL,
+                tool_calls_used = 0,
+                updated_at      = NOW()
             WHERE task_id = %s AND status = 'verifying'
             """,
             (f"[Auditor issues]: {issues}", task_id)

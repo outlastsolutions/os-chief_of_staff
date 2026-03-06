@@ -128,14 +128,19 @@ def fail_task(conn, task_id: str, agent_id: str, reason: str) -> dict:
         next_status = "blocked" if row["attempt"] >= MAX_ATTEMPTS else "planned"
         blocked_reason = reason if next_status == "blocked" else None
 
+        if next_status == "planned":
+            # Clear plan so planner re-plans with failure context
+            cur.execute("DELETE FROM plans WHERE task_id = %s", (task_id,))
         cur.execute(
             """
             UPDATE tasks
-            SET status        = %s,
-                leased_by     = NULL,
-                leased_until  = NULL,
-                blocked_reason = %s,
-                updated_at    = NOW()
+            SET status          = %s,
+                leased_by       = NULL,
+                leased_until    = NULL,
+                blocked_reason  = %s,
+                plan_id         = NULL,
+                tool_calls_used = 0,
+                updated_at      = NOW()
             WHERE task_id = %s
             RETURNING *
             """,

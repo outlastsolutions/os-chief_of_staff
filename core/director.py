@@ -58,7 +58,7 @@ def run_domain(conn, domain: str, request_id: Optional[str] = None,
                 results["failed"] += 1
                 continue
 
-        # 2. Build the next planned+planned task
+        # 2. Build the next planned task (must have a plan attached)
         report = builder_agent.execute_task(
             conn, agent_id=f"builder:{domain}",
             director=domain, task_id=None
@@ -66,7 +66,11 @@ def run_domain(conn, domain: str, request_id: Optional[str] = None,
         if report:
             results["built"] += 1
         else:
-            # Nothing left to build in this domain right now
+            # Check if there are still planned tasks remaining before giving up
+            remaining = _count_active(conn, domain, request_id)
+            if remaining == 0:
+                break
+            # Builder found nothing claimable right now (all leased or no plans yet)
             if not task:
                 break
 
@@ -188,6 +192,24 @@ def _next_unplanned(conn, domain: str,
         )
         row = cur.fetchone()
     return dict(row) if row else None
+
+
+def _count_active(conn, domain: str, request_id: Optional[str]) -> int:
+    """Count tasks still in an active (non-terminal) state for this domain."""
+    filters = [
+        "assigned_director = %s",
+        "status IN ('planned', 'executing', 'verifying')",
+    ]
+    params: list = [domain]
+    if request_id:
+        filters.append("request_id = %s")
+        params.append(request_id)
+    with conn.cursor() as cur:
+        cur.execute(
+            f"SELECT COUNT(*) AS n FROM tasks WHERE {' AND '.join(filters)}",
+            params
+        )
+        return cur.fetchone()["n"]
 
 
 def _get_blocked(conn, domain: str,
