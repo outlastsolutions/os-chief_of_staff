@@ -1,5 +1,5 @@
 """
-OSAIO Project Manager (PM) Agent — v0.2
+OSAIO Project Manager (PM) Agent — v0.1
 Outlast Solutions LLC © 2026
 
 Responsibilities:

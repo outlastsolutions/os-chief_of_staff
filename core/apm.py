@@ -1,5 +1,5 @@
 """
-OSAIO Assistant Project Manager (APM) Agent — v0.3
+OSAIO Assistant Project Manager (APM) Agent — v0.1
 Outlast Solutions LLC © 2026
 
 Responsibilities:

@@ -1,5 +1,5 @@
 """
-OSAIO Planner Agent — v0.4
+OSAIO Planner Agent — v0.1
 Outlast Solutions LLC © 2026
 
 Responsibilities:
