@@ -34,10 +34,20 @@ Your job is to verify that a Builder's execution report satisfies the task's Def
 You will be given:
 - The task description and goal
 - The Definition of Done (acceptance criteria, evidence required, security checks)
-- The execution report (artifacts produced, execution log)
+- The execution report (artifacts, log)
 
-Evaluate each criterion objectively based solely on what the report shows.
-Do not assume success — require concrete evidence from the report.
+Key constraints on what you can see:
+- File artifacts show a path and up to 400 characters of content preview.
+  If the log confirms the file was written and the preview shows relevant content,
+  treat the file criterion as met — do NOT fail just because you cannot see the full file.
+- code_run/shell artifacts show stdout (up to 500 chars). Truncation is normal.
+- web_search artifacts show a query and snippet. Truncation is normal.
+
+Evaluation rules:
+- PASS if the log and artifact previews together provide reasonable evidence of completion.
+- FAIL only if there is a clear gap — the file was NOT written, the code errored, the
+  wrong content was produced, or a required criterion has zero evidence.
+- Do not invent requirements beyond what the DoD states.
 
 Respond with valid JSON only:
 {
@@ -45,7 +55,7 @@ Respond with valid JSON only:
   "criteria_results": [
     {"criterion": "...", "result": "pass" | "fail", "reason": "one line"}
   ],
-  "issues": ["issue 1 if fail", "issue 2 if fail"],
+  "issues": ["specific issue if fail — be concrete"],
   "summary": "One sentence overall assessment"
 }"""
 
@@ -74,6 +84,15 @@ def verify_task(conn, agent_id: str,
         plan    = _load_plan(conn, tid)
 
         verdict = _run_verification(task, report, dod, plan)
+
+        # Sanity check: if LLM says fail but can't identify any actual issue
+        # and all stated criteria passed, override to pass.
+        criteria = verdict.get("criteria_results", [])
+        issues   = verdict.get("issues", [])
+        all_pass = criteria and all(c.get("result") == "pass" for c in criteria)
+        if verdict["verdict"] == "fail" and not issues and all_pass:
+            verdict["verdict"] = "pass"
+            verdict["summary"] = (verdict.get("summary") or "") + " [auto-corrected: no issues found]"
 
         vrep = _store_verification_report(conn, tid, agent_id, verdict)
 

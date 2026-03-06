@@ -126,14 +126,16 @@ def _claim(conn, agent_id: str, director: Optional[str],
         return dict(row) if row else None
     else:
         # Claim next available task with a plan
+        director_clause = "AND assigned_director = %s" if director else ""
+        params = [director, agent_id] if director else [agent_id]
         with conn.cursor() as cur:
             cur.execute(
-                """
+                f"""
                 WITH candidate AS (
                     SELECT task_id FROM tasks
                     WHERE status = 'planned' AND plan_id IS NOT NULL
                       AND (leased_until IS NULL OR leased_until < NOW())
-                      %s
+                      {director_clause}
                     ORDER BY created_at
                     FOR UPDATE SKIP LOCKED
                     LIMIT 1
@@ -145,8 +147,8 @@ def _claim(conn, agent_id: str, director: Optional[str],
                 FROM candidate
                 WHERE t.task_id = candidate.task_id
                 RETURNING t.*
-                """ % ("AND assigned_director = %s" if director else ""),
-                ([director, agent_id] if director else [agent_id])
+                """,
+                params
             )
             row = cur.fetchone()
         return dict(row) if row else None
@@ -244,17 +246,17 @@ def _execute_steps(conn, task_id: str, agent_id: str,
         try:
             if tool == "file_edit":
                 exec_result = _tool_file_edit(resource, content)
-                artifacts.append({"type": "file", "path": resource, "preview": content[:400]})
+                artifacts.append({"type": "file", "path": resource, "preview": content[:1200]})
 
             elif tool == "code_run":
                 exec_result = _tool_code_run(content)
                 artifacts.append({"type": "code_output", "path": resource,
-                                   "output": exec_result[:500]})
+                                   "output": exec_result[:1000]})
 
             elif tool == "shell":
                 exec_result = _tool_shell(content)
                 artifacts.append({"type": "shell_output", "command": content,
-                                   "output": exec_result[:500]})
+                                   "output": exec_result[:1000]})
 
             elif tool == "web_search":
                 exec_result = _tool_web_search(content or resource)
