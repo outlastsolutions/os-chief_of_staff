@@ -28,20 +28,26 @@ from core.idempotency import enqueue_outbox
 # ── System prompt ─────────────────────────────────────────────────────────
 
 APM_SYSTEM = """You are the Assistant Project Manager (APM) for Outlast Solutions LLC.
-Your job is to decompose a scoped work request into a concrete, executable task graph.
+Your job is to decompose a scoped work request into a minimal, executable task graph.
 
 Rules:
-- Break the request into 3-10 discrete tasks. Each task must be completable by one agent.
+- Use the FEWEST tasks possible. Most requests need 1-3 tasks. Never exceed 5.
+- A task is one coherent unit of work one agent can complete end-to-end. Do NOT split
+  "research" and "write" or "search" and "save" into separate tasks — that is one task.
+- Only create a separate task when it has a genuinely different owner, tool set, or
+  can run in parallel with another task. Prep/clarification/validation sub-steps belong
+  INSIDE a single task's plan, not as separate tasks.
+- Bad decomposition: Search web | Evaluate results | Write summary | Save file (4 tasks)
+- Good decomposition: Research and document findings (1 task)
 - Every task needs a clear Definition of Done with testable acceptance criteria.
-- Assign complexity: low (simple script/doc), medium (moderate code/research), high (complex architecture/multi-step).
+- Assign complexity: low (simple script/doc/search), medium (moderate code/research), high (complex architecture).
 - Assign the correct director domain: development | operations | research | marketing
 - List tools the executor will need: github_api | web_search | file_edit | code_run | slack_api | docs_api | shell
-- Specify dependencies as a list of task titles that must complete first (empty list if none).
+- Specify dependencies only when a task genuinely cannot start until another finishes.
 - Evidence required must match the task type:
-    code tasks → ["git_diff", "test_output", "file_paths"]
-    research tasks → ["citations", "source_notes"]
-    ops tasks → ["sop_doc", "checklist", "before_after_metrics"]
-    content tasks → ["draft", "seo_brief"]
+    code tasks → ["file_paths", "test_output"]
+    research tasks → ["source_notes"]
+    content tasks → ["draft"]
 
 Respond with valid JSON only."""
 
@@ -296,7 +302,16 @@ def _build_decomposition_prompt(request: dict, scoping: dict) -> str:
     criteria = "\n".join(f"  - {c}" for c in scoping.get("acceptance_criteria", []))
     ambiguities = "\n".join(f"  - {a}" for a in scoping.get("ambiguities", []))
 
-    return f"""Decompose this work request into an executable task graph.
+    # Rough task count hint based on description length and complexity
+    desc_len = len(request.get('description', ''))
+    if desc_len < 200:
+        task_hint = "This is a small request. Aim for 1 task, 2 at most."
+    elif desc_len < 500:
+        task_hint = "This is a medium request. Aim for 2-3 tasks."
+    else:
+        task_hint = "This is a larger request. Use up to 5 tasks, no more."
+
+    return f"""Decompose this work request into a MINIMAL executable task graph.
 
 Request ID: {request['request_id']}
 Title: {request['title']}
@@ -310,6 +325,9 @@ Acceptance criteria:
 
 Known ambiguities to account for:
 {ambiguities or '  (none)'}
+
+Sizing guidance: {task_hint}
+Remember: sub-steps (search, evaluate, write, save) belong INSIDE one task — not as separate tasks.
 
 Return JSON in exactly this format:
 {{
