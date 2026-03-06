@@ -1,0 +1,114 @@
+"""
+OSAIO LLM abstraction
+Outlast Solutions LLC © 2026
+
+Unified chat interface supporting Claude (Anthropic) and Gemini (Google).
+Model is selected per agent via config/settings.py or passed directly.
+Provider is inferred from the model ID prefix.
+"""
+
+from __future__ import annotations
+import json
+from typing import Optional
+from config.settings import ANTHROPIC_API_KEY, GEMINI_API_KEY
+
+
+def _is_claude(model: str) -> bool:
+    return model.startswith("claude")
+
+
+def chat(model: str, system: str, messages: list[dict],
+         max_tokens: int = 4096, temperature: float = 0.2) -> str:
+    """
+    Send a chat request to Claude or Gemini.
+
+    Args:
+        model:       Model ID — e.g. 'claude-sonnet-4-6' or 'gemini-2.5-flash'
+        system:      System prompt string
+        messages:    List of {"role": "user"|"assistant", "content": str}
+        max_tokens:  Max output tokens
+        temperature: Sampling temperature (lower = more deterministic)
+
+    Returns:
+        Response text as a string.
+    """
+    if _is_claude(model):
+        return _claude(model, system, messages, max_tokens, temperature)
+    else:
+        return _gemini(model, system, messages, max_tokens, temperature)
+
+
+def chat_json(model: str, system: str, messages: list[dict],
+              max_tokens: int = 4096) -> dict:
+    """
+    Like chat(), but parses the response as JSON.
+    Appends an instruction to return valid JSON if not already in the system prompt.
+    Raises ValueError if the response cannot be parsed.
+    """
+    if "json" not in system.lower():
+        system += "\n\nRespond with valid JSON only. No markdown, no code fences, no commentary."
+
+    raw = chat(model, system, messages, max_tokens, temperature=0.1)
+
+    # Strip markdown code fences if the model added them anyway
+    raw = raw.strip()
+    if raw.startswith("```"):
+        raw = raw.split("\n", 1)[-1]
+        raw = raw.rsplit("```", 1)[0]
+
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"LLM returned invalid JSON: {e}\n\nRaw response:\n{raw}")
+
+
+# ── Claude ────────────────────────────────────────────────────────────────
+
+def _claude(model: str, system: str, messages: list[dict],
+            max_tokens: int, temperature: float) -> str:
+    import anthropic
+    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+    response = client.messages.create(
+        model=model,
+        system=system,
+        messages=messages,
+        max_tokens=max_tokens,
+        temperature=temperature,
+    )
+    return response.content[0].text
+
+
+# ── Gemini ────────────────────────────────────────────────────────────────
+
+def _gemini(model: str, system: str, messages: list[dict],
+            max_tokens: int, temperature: float) -> str:
+    import google.generativeai as genai
+    genai.configure(api_key=GEMINI_API_KEY)
+
+    gen_config = {
+        "max_output_tokens": max_tokens,
+        "temperature": temperature,
+    }
+
+    client = genai.GenerativeModel(
+        model_name=model,
+        system_instruction=system,
+        generation_config=gen_config,
+    )
+
+    # Convert to Gemini format
+    history = []
+    last_message = None
+    for msg in messages:
+        role = "user" if msg["role"] == "user" else "model"
+        if msg is messages[-1] and role == "user":
+            last_message = msg["content"]
+        else:
+            history.append({"role": role, "parts": [msg["content"]]})
+
+    if last_message is None:
+        last_message = messages[-1]["content"]
+
+    convo = client.start_chat(history=history)
+    response = convo.send_message(last_message)
+    return response.text
