@@ -244,7 +244,7 @@ def _execute_steps(conn, task_id: str, agent_id: str,
         try:
             if tool == "file_edit":
                 exec_result = _tool_file_edit(resource, content)
-                artifacts.append({"type": "file", "path": resource})
+                artifacts.append({"type": "file", "path": resource, "preview": content[:400]})
 
             elif tool == "code_run":
                 exec_result = _tool_code_run(content)
