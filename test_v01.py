@@ -49,6 +49,34 @@ def should_raise(name, exc_type, fn):
         results.append(False)
 
 
+# ─── cleanup prior test artifacts ─────────────────────────────────────────
+print("\n── Cleanup ──")
+
+def test_cleanup():
+    """Delete tasks/requests left behind by previous test runs."""
+    with transaction() as conn:
+        with conn.cursor() as cur:
+            # Delete child rows first (no CASCADE on these FKs)
+            cur.execute("DELETE FROM agent_logs WHERE task_id LIKE 'TASK-%'")
+            cur.execute("DELETE FROM artifacts WHERE task_id LIKE 'TASK-%'")
+            cur.execute("DELETE FROM execution_reports WHERE task_id LIKE 'TASK-%'")
+            cur.execute("DELETE FROM verification_reports WHERE task_id LIKE 'TASK-%'")
+            # tasks (definitions_of_done cascades automatically)
+            cur.execute("DELETE FROM tasks WHERE task_id LIKE 'TASK-%'")
+            deleted_tasks = cur.rowcount
+            # requests + their dependents
+            cur.execute("DELETE FROM director_reports WHERE request_id IN "
+                        "(SELECT request_id FROM requests WHERE requester = 'test')")
+            cur.execute("DELETE FROM agent_logs WHERE request_id IN "
+                        "(SELECT request_id FROM requests WHERE requester = 'test')")
+            cur.execute("DELETE FROM outbox WHERE dedupe_key LIKE 'slack:test:%'")
+            cur.execute("DELETE FROM requests WHERE requester = 'test'")
+            deleted_requests = cur.rowcount
+    print(f"         removed {deleted_tasks} task(s), {deleted_requests} request(s) from prior runs")
+
+check("clean up prior test data", test_cleanup)
+
+
 # ─── schema ────────────────────────────────────────────────────────────────
 print("\n── Schema ──")
 
@@ -228,12 +256,20 @@ def test_claim_task():
 check("claim_task atomically leases a planned task", test_claim_task)
 
 def test_claim_is_exclusive():
+    # Verify the lease task is exclusively held by agent-001 —
+    # agent-002 cannot claim the same task while the lease is live.
     with transaction() as conn:
-        # All available tasks are now leased — nothing to claim
-        t = claim_task(conn, "agent-002", director="development")
-        assert t is None, "No task should be available (lease held)"
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT leased_by, status, leased_until FROM tasks WHERE task_id = %s",
+                (lease_task_id,)
+            )
+            row = cur.fetchone()
+        assert row["status"] == "executing", f"Expected executing, got {row['status']}"
+        assert row["leased_by"] == "agent-001", f"Expected agent-001, got {row['leased_by']}"
+        assert row["leased_until"] is not None, "Lease expiry should be set"
 
-check("second claim returns None (lease exclusive)", test_claim_is_exclusive)
+check("lease task is exclusively held by agent-001", test_claim_is_exclusive)
 
 def test_resource_lock():
     key = f"repo:test:branch:{uuid.uuid4().hex}"
