@@ -296,8 +296,7 @@ def _transition_done(conn, task_id: str, agent_id: str) -> None:
 def _transition_back_to_builder(conn, task_id: str, agent_id: str, issues: str) -> None:
     """Return task to planned so any builder can retry with audit issues noted."""
     with conn.cursor() as cur:
-        # Delete old plan so planner produces a fresh one informed by audit issues
-        cur.execute("DELETE FROM plans WHERE task_id = %s", (task_id,))
+        # NULL plan_id on task FIRST (FK constraint), then delete the plan
         cur.execute(
             """
             UPDATE tasks
@@ -312,6 +311,7 @@ def _transition_back_to_builder(conn, task_id: str, agent_id: str, issues: str) 
             """,
             (f"[Auditor issues]: {issues}", task_id)
         )
+        cur.execute("DELETE FROM plans WHERE task_id = %s", (task_id,))
         cur.execute(
             """
             INSERT INTO agent_logs (agent_name, role, action, task_id, log_data)
