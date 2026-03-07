@@ -43,10 +43,38 @@ def err(msg: str):
 
 # ── One cycle ─────────────────────────────────────────────────────────────────
 
+def _recover_stale_leases(conn) -> int:
+    """Reset tasks stuck in executing/verifying with expired leases back to planned."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE tasks
+            SET status          = 'planned',
+                leased_by       = NULL,
+                leased_until    = NULL,
+                plan_id         = NULL,
+                tool_calls_used = 0,
+                updated_at      = NOW()
+            WHERE status IN ('executing', 'verifying')
+              AND leased_until < NOW()
+            RETURNING task_id, title, status
+            """
+        )
+        recovered = cur.fetchall()
+    if recovered:
+        conn.commit()
+        for r in recovered:
+            log(f"[recovery] reset stale lease: {r['task_id']} — {r['title'][:60]}")
+    return len(recovered)
+
+
 def _run_cycle(conn) -> dict:
     summary = {"ingested": 0, "scoped": 0, "decomposed": 0, "tasks_run": 0}
 
-    # ── 0. Slack intake: pull new messages from #tasks ────────────────────────
+    # ── 0a. Recover stale leases ──────────────────────────────────────────────
+    _recover_stale_leases(conn)
+
+    # ── 0b. Slack intake: pull new messages from #tasks ───────────────────────
     try:
         ingested = slack_ingest(conn)
         summary["ingested"] = ingested
