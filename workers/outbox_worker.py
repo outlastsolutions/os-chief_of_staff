@@ -31,7 +31,9 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from db.connection import transaction
-from core.idempotency import claim_pending_outbox, mark_outbox_sent, mark_outbox_failed
+from core.idempotency import (
+    claim_pending_outbox, mark_outbox_sent, mark_outbox_failed, reclaim_stale_outbox
+)
 from core.secretary_client import post_slack, send_email as sec_send_email
 
 
@@ -88,9 +90,13 @@ def dispatch(item: dict) -> str:
 def drain_once() -> int:
     """
     Claim and dispatch one batch of pending outbox items.
+    Reclaims any stale 'sending' rows first (recovery from prior worker crash).
     Returns the number of items processed.
     """
     with transaction() as conn:
+        reclaimed = reclaim_stale_outbox(conn)
+        if reclaimed:
+            print(f"  [outbox] reclaimed {reclaimed} stale sending row(s)")
         items = claim_pending_outbox(conn, limit=BATCH_SIZE)
 
     processed = 0

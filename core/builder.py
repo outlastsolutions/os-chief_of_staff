@@ -433,6 +433,15 @@ def _compute_lock_key(tool: str, resource: str, content: str,
 
 # ── Tool handlers ─────────────────────────────────────────────────────────
 
+def _within_workspace(abs_path: str, workspace: str) -> bool:
+    """Return True iff abs_path is workspace itself or a descendant of it.
+    Uses realpath to resolve symlinks and os.sep to prevent prefix-match bypass
+    (e.g. /tmp/work matching /tmp/working)."""
+    real_ws   = os.path.realpath(workspace)
+    real_path = os.path.realpath(abs_path)
+    return real_path == real_ws or real_path.startswith(real_ws + os.sep)
+
+
 def _tool_file_edit(path: str, content: str, workspace: str) -> str:
     if not path or path in ("n/a", "N/A", ""):
         raise ValueError("file_edit requires a valid path.")
@@ -441,8 +450,8 @@ def _tool_file_edit(path: str, content: str, workspace: str) -> str:
         abs_path = os.path.join(workspace, path)
     else:
         abs_path = path
-    # Restrict writes to workspace only
-    if not os.path.abspath(abs_path).startswith(workspace):
+    # Restrict writes to workspace only (realpath + sep prevents prefix-match bypass)
+    if not _within_workspace(abs_path, workspace):
         raise PermissionError(f"file_edit: path '{path}' is outside workspace.")
     parent = os.path.dirname(abs_path)
     if parent:
@@ -616,8 +625,11 @@ def _tool_github_api(content: str, resource: str, workspace: str,
         return f"{verb} {repo}/{path} on {branch}"
 
     elif action == "push_workspace":
-        # Push all files from a local directory (or the task workspace) to a repo branch
+        # Push all files from a local directory (or the task workspace) to a repo branch.
+        # local_dir is LLM-controlled; constrain it to workspace to prevent exfiltration.
         local_dir = params.get("local_dir") or workspace
+        if not _within_workspace(local_dir, workspace):
+            local_dir = workspace
         message   = params.get("message", "feat: builder output via CoS")
         pushed    = []
         errors    = []

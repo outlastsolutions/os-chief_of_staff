@@ -183,14 +183,17 @@ CREATE INDEX IF NOT EXISTS agent_logs_role_idx ON agent_logs (role);
 -- go through here. Dedupe key prevents doubles.
 -- ─────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS outbox (
-    outbox_id   BIGSERIAL PRIMARY KEY,
-    dedupe_key  TEXT NOT NULL,
-    type        TEXT NOT NULL,   -- slack_post | github_comment | email | webhook
-    payload     JSONB NOT NULL,
-    status      TEXT NOT NULL DEFAULT 'pending',  -- pending | sent | failed
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    sent_at     TIMESTAMPTZ
+    outbox_id    BIGSERIAL PRIMARY KEY,
+    dedupe_key   TEXT NOT NULL,
+    type         TEXT NOT NULL,   -- slack_post | github_comment | email | webhook
+    payload      JSONB NOT NULL,
+    status       TEXT NOT NULL DEFAULT 'pending',  -- pending | sending | sent | failed
+    leased_until TIMESTAMPTZ,     -- set when status='sending'; reclaim path if worker crashes
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    sent_at      TIMESTAMPTZ
 );
+-- Migration: add leased_until to existing deployments
+ALTER TABLE outbox ADD COLUMN IF NOT EXISTS leased_until TIMESTAMPTZ;
 
 CREATE UNIQUE INDEX IF NOT EXISTS outbox_dedupe_key_uq ON outbox (dedupe_key);
 CREATE INDEX IF NOT EXISTS outbox_status_idx ON outbox (status);

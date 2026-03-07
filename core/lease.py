@@ -140,7 +140,9 @@ def fail_task(conn, task_id: str, agent_id: str, reason: str,
             raise ValueError(f"Task '{task_id}' not found.")
 
         next_status = "blocked" if row["attempt"] >= MAX_ATTEMPTS else "planned"
-        blocked_reason = reason if next_status == "blocked" else None
+        # Always preserve the failure reason — planner reads blocked_reason as prior-failure
+        # context when re-planning; clearing it on non-terminal retries dropped that context.
+        blocked_reason = reason
 
         # NULL plan_id on task FIRST (FK constraint), then delete the plan
         cur.execute(

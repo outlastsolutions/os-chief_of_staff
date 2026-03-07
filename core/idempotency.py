@@ -83,16 +83,43 @@ def enqueue_outbox(conn, dedupe_key: str, type_: str, payload: dict) -> Optional
     return row["outbox_id"] if row else None
 
 
-def claim_pending_outbox(conn, limit: int = 10) -> list[dict]:
+OUTBOX_LEASE_MINUTES = 5
+
+
+def reclaim_stale_outbox(conn) -> int:
     """
-    Claim a batch of pending outbox items for the sender worker.
-    Marks them 'sending' so no other worker picks them up.
+    Reset outbox rows stuck in 'sending' back to 'pending'.
+    Called at the start of each drain cycle to recover from worker crashes.
+    A row is stale if leased_until has passed (or is NULL but status is 'sending',
+    which can happen on rows claimed before this column was added).
+    Returns the number of rows reclaimed.
     """
     with conn.cursor() as cur:
         cur.execute(
             """
             UPDATE outbox
-            SET status = 'sending'
+            SET status = 'pending', leased_until = NULL
+            WHERE status = 'sending'
+              AND (leased_until IS NULL OR leased_until < NOW())
+            RETURNING outbox_id
+            """
+        )
+        reclaimed = cur.rowcount
+    return reclaimed
+
+
+def claim_pending_outbox(conn, limit: int = 10) -> list[dict]:
+    """
+    Claim a batch of pending outbox items for the sender worker.
+    Marks them 'sending' with a leased_until TTL so a crashed worker's
+    items can be reclaimed by the next call to reclaim_stale_outbox().
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE outbox
+            SET status = 'sending',
+                leased_until = NOW() + INTERVAL '%s minutes'
             WHERE outbox_id IN (
                 SELECT outbox_id FROM outbox
                 WHERE status = 'pending'
@@ -102,7 +129,7 @@ def claim_pending_outbox(conn, limit: int = 10) -> list[dict]:
             )
             RETURNING *
             """,
-            (limit,)
+            (OUTBOX_LEASE_MINUTES, limit)
         )
         rows = cur.fetchall()
 
