@@ -144,8 +144,11 @@ def run(poll_interval: int = DEFAULT_POLL_INTERVAL, once: bool = False) -> None:
         print(f"[outbox_worker] drained — attempted={attempted} sent={sent} failed={failed}")
         return
 
-    signal.signal(signal.SIGTERM, _handle_signal)
-    signal.signal(signal.SIGINT, _handle_signal)
+    try:
+        signal.signal(signal.SIGTERM, _handle_signal)
+        signal.signal(signal.SIGINT, _handle_signal)
+    except ValueError:
+        pass  # signal registration only works in main thread; skip in embedded/test use
 
     print(f"[outbox_worker] starting — polling every {poll_interval}s")
     while not _shutdown:

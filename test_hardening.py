@@ -309,6 +309,44 @@ def test_worker_sigterm():
     siw._shutdown = False  # reset
 
 
+# ── 9c. Worker shutdown loop termination (thread-based) ───────────────────
+
+def test_worker_shutdown_terminates():
+    section("9c — Worker loop actually terminates after signal")
+    import threading
+    import time
+    import workers.outbox_worker as ow
+
+    # Patch drain_once to a no-op so the test doesn't touch the DB
+    original_drain = ow.drain_once
+
+    def _fake_drain():
+        return 0, 0, 0
+
+    ow.drain_once = _fake_drain
+    ow._shutdown = False
+
+    thread = threading.Thread(
+        target=ow.run,
+        kwargs={"poll_interval": 1, "once": False},
+        daemon=True,
+    )
+    thread.start()
+
+    # Give the loop one iteration to start, then signal shutdown
+    time.sleep(0.1)
+    ow._handle_signal(15, None)
+
+    thread.join(timeout=3)
+    exited = not thread.is_alive()
+    check("outbox_worker run() exits within 3s after _handle_signal", exited,
+          "thread still alive" if not exited else "")
+
+    # Restore
+    ow.drain_once = original_drain
+    ow._shutdown = False
+
+
 # ── 10. DB connect_args SQLite-only ───────────────────────────────────────
 
 def test_db_connect_args():
@@ -352,6 +390,7 @@ def main() -> int:
         test_outbox_worker_counters,
         test_worker_interval_validation,
         test_worker_sigterm,
+        test_worker_shutdown_terminates,
         test_db_connect_args,
         test_conversation_context_isolation,
     ]

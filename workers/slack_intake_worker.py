@@ -57,8 +57,11 @@ def run(poll_interval: int = DEFAULT_POLL_INTERVAL,
         print(f"[slack_intake_worker] ingested {n} new request(s).")
         return
 
-    signal.signal(signal.SIGTERM, _handle_signal)
-    signal.signal(signal.SIGINT, _handle_signal)
+    try:
+        signal.signal(signal.SIGTERM, _handle_signal)
+        signal.signal(signal.SIGINT, _handle_signal)
+    except ValueError:
+        pass  # signal registration only works in main thread; skip in embedded/test use
 
     print(f"[slack_intake_worker] starting — polling every {poll_interval}s "
           f"(lookback {lookback_hours}h)")
