@@ -12,6 +12,9 @@ import json
 import uuid
 from typing import Optional
 
+OUTBOX_MAX_ATTEMPTS = 5          # after this many failures the row goes 'dead'
+OUTBOX_BACKOFF_BASE = 2          # exponential backoff base (minutes): 2, 4, 8, 16, 32
+
 
 def upsert_request(conn, request_data: dict) -> dict:
     """
@@ -110,9 +113,9 @@ def reclaim_stale_outbox(conn) -> int:
 
 def claim_pending_outbox(conn, limit: int = 10) -> list[dict]:
     """
-    Claim a batch of pending outbox items for the sender worker.
-    Marks them 'sending' with a leased_until TTL so a crashed worker's
-    items can be reclaimed by the next call to reclaim_stale_outbox().
+    Claim a batch of pending outbox items that are ready to send.
+    Skips rows whose next_retry_at is in the future (backoff window).
+    Marks claimed rows 'sending' with a leased_until TTL.
     """
     with conn.cursor() as cur:
         cur.execute(
@@ -123,6 +126,7 @@ def claim_pending_outbox(conn, limit: int = 10) -> list[dict]:
             WHERE outbox_id IN (
                 SELECT outbox_id FROM outbox
                 WHERE status = 'pending'
+                  AND (next_retry_at IS NULL OR next_retry_at <= NOW())
                 ORDER BY created_at
                 FOR UPDATE SKIP LOCKED
                 LIMIT %s
@@ -144,9 +148,44 @@ def mark_outbox_sent(conn, outbox_id: int) -> None:
         )
 
 
-def mark_outbox_failed(conn, outbox_id: int) -> None:
+def mark_outbox_failed(conn, outbox_id: int, error: str = "") -> None:
+    """
+    Record a dispatch failure. Increments attempt counter and schedules exponential
+    backoff via next_retry_at. After OUTBOX_MAX_ATTEMPTS the row becomes 'dead'
+    (terminal — will never be retried automatically).
+    """
     with conn.cursor() as cur:
         cur.execute(
-            "UPDATE outbox SET status = 'failed' WHERE outbox_id = %s",
+            "SELECT attempts FROM outbox WHERE outbox_id = %s",
             (outbox_id,)
         )
+        row = cur.fetchone()
+        next_attempts = (row["attempts"] if row else 0) + 1
+
+        if next_attempts >= OUTBOX_MAX_ATTEMPTS:
+            cur.execute(
+                """
+                UPDATE outbox
+                SET status = 'dead',
+                    attempts = %s,
+                    last_error = %s,
+                    leased_until = NULL
+                WHERE outbox_id = %s
+                """,
+                (next_attempts, error[:500], outbox_id)
+            )
+        else:
+            # Exponential backoff: 2^attempts minutes (2, 4, 8, 16 … capped at 60)
+            backoff_minutes = min(OUTBOX_BACKOFF_BASE ** next_attempts, 60)
+            cur.execute(
+                """
+                UPDATE outbox
+                SET status = 'pending',
+                    attempts = %s,
+                    last_error = %s,
+                    next_retry_at = NOW() + (%s * INTERVAL '1 minute'),
+                    leased_until = NULL
+                WHERE outbox_id = %s
+                """,
+                (next_attempts, error[:500], backoff_minutes, outbox_id)
+            )

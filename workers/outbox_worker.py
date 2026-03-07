@@ -109,7 +109,7 @@ def drain_once() -> int:
             print(f"  [outbox] sent  #{oid} ({item['type']}) → {result}")
         except Exception as e:
             with transaction() as conn:
-                mark_outbox_failed(conn, oid)
+                mark_outbox_failed(conn, oid, error=str(e))
             print(f"  [outbox] FAIL  #{oid} ({item['type']}): {e}")
         processed += 1
 

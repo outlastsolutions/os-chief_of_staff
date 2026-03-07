@@ -150,36 +150,48 @@ def get_report(conn, task_id: str) -> Optional[dict]:
 
 def _claim(conn, agent_id: str, director: Optional[str],
            task_id: Optional[str]) -> Optional[dict]:
+    # Dependency gate: only tasks whose every dependency is done are claimable.
+    _DEP_GATE = """
+        NOT EXISTS (
+            SELECT 1 FROM jsonb_array_elements_text(COALESCE(t.dependencies, '[]'::jsonb)) AS dep
+            WHERE NOT EXISTS (
+                SELECT 1 FROM tasks d WHERE d.task_id = dep AND d.status = 'done'
+            )
+        )
+    """
+
     if task_id:
         # Direct claim of a specific task
         with conn.cursor() as cur:
             cur.execute(
-                """
-                UPDATE tasks
+                f"""
+                UPDATE tasks t
                 SET status = 'executing', leased_by = %s,
                     leased_until = NOW() + INTERVAL '10 minutes',
                     attempt = attempt + 1, updated_at = NOW()
-                WHERE task_id = %s AND status = 'planned' AND plan_id IS NOT NULL
-                  AND (leased_until IS NULL OR leased_until < NOW())
-                RETURNING *
+                WHERE t.task_id = %s AND t.status = 'planned' AND t.plan_id IS NOT NULL
+                  AND (t.leased_until IS NULL OR t.leased_until < NOW())
+                  AND {_DEP_GATE}
+                RETURNING t.*
                 """,
                 (agent_id, task_id)
             )
             row = cur.fetchone()
         return dict(row) if row else None
     else:
-        # Claim next available task with a plan
-        director_clause = "AND assigned_director = %s" if director else ""
+        # Claim next available task with a plan and all dependencies satisfied
+        director_clause = "AND t.assigned_director = %s" if director else ""
         params = [director, agent_id] if director else [agent_id]
         with conn.cursor() as cur:
             cur.execute(
                 f"""
                 WITH candidate AS (
-                    SELECT task_id FROM tasks
-                    WHERE status = 'planned' AND plan_id IS NOT NULL
-                      AND (leased_until IS NULL OR leased_until < NOW())
+                    SELECT t.task_id FROM tasks t
+                    WHERE t.status = 'planned' AND t.plan_id IS NOT NULL
+                      AND (t.leased_until IS NULL OR t.leased_until < NOW())
                       {director_clause}
-                    ORDER BY created_at
+                      AND {_DEP_GATE}
+                    ORDER BY t.created_at
                     FOR UPDATE SKIP LOCKED
                     LIMIT 1
                 )
@@ -626,10 +638,13 @@ def _tool_github_api(content: str, resource: str, workspace: str,
 
     elif action == "push_workspace":
         # Push all files from a local directory (or the task workspace) to a repo branch.
-        # local_dir is LLM-controlled; constrain it to workspace to prevent exfiltration.
+        # local_dir is LLM-controlled; reject paths that resolve outside workspace.
         local_dir = params.get("local_dir") or workspace
         if not _within_workspace(local_dir, workspace):
-            local_dir = workspace
+            raise _BuilderError(
+                f"push_workspace: local_dir '{local_dir}' resolves outside task workspace — aborted.",
+                FailureCode.TOOL_FAILURE,
+            )
         message   = params.get("message", "feat: builder output via CoS")
         pushed    = []
         errors    = []

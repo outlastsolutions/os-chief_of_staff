@@ -44,7 +44,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     task_id             TEXT PRIMARY KEY,
     request_id          TEXT NOT NULL REFERENCES requests(request_id),
     created_by          TEXT NOT NULL DEFAULT 'apm',
-    assigned_director   TEXT NOT NULL,      -- development | operations | marketing | research | compute
+    assigned_director   TEXT NOT NULL,      -- development | operations | marketing | research
     title               TEXT NOT NULL,
     description         TEXT NOT NULL,
     tools_allowed       JSONB NOT NULL DEFAULT '[]',
@@ -183,17 +183,23 @@ CREATE INDEX IF NOT EXISTS agent_logs_role_idx ON agent_logs (role);
 -- go through here. Dedupe key prevents doubles.
 -- ─────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS outbox (
-    outbox_id    BIGSERIAL PRIMARY KEY,
-    dedupe_key   TEXT NOT NULL,
-    type         TEXT NOT NULL,   -- slack_post | github_comment | email | webhook
-    payload      JSONB NOT NULL,
-    status       TEXT NOT NULL DEFAULT 'pending',  -- pending | sending | sent | failed
-    leased_until TIMESTAMPTZ,     -- set when status='sending'; reclaim path if worker crashes
-    created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    sent_at      TIMESTAMPTZ
+    outbox_id      BIGSERIAL PRIMARY KEY,
+    dedupe_key     TEXT NOT NULL,
+    type           TEXT NOT NULL,   -- slack_post | github_comment | email | webhook
+    payload        JSONB NOT NULL,
+    status         TEXT NOT NULL DEFAULT 'pending',  -- pending | sending | sent | failed | dead
+    attempts       INT NOT NULL DEFAULT 0,           -- dispatch attempt count
+    last_error     TEXT,                             -- last dispatch error message
+    next_retry_at  TIMESTAMPTZ,                      -- earliest time to retry (exponential backoff)
+    leased_until   TIMESTAMPTZ,     -- set when status='sending'; reclaim path if worker crashes
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    sent_at        TIMESTAMPTZ
 );
--- Migration: add leased_until to existing deployments
-ALTER TABLE outbox ADD COLUMN IF NOT EXISTS leased_until TIMESTAMPTZ;
+-- Migrations: add columns to existing deployments
+ALTER TABLE outbox ADD COLUMN IF NOT EXISTS leased_until  TIMESTAMPTZ;
+ALTER TABLE outbox ADD COLUMN IF NOT EXISTS attempts      INT NOT NULL DEFAULT 0;
+ALTER TABLE outbox ADD COLUMN IF NOT EXISTS last_error    TEXT;
+ALTER TABLE outbox ADD COLUMN IF NOT EXISTS next_retry_at TIMESTAMPTZ;
 
 CREATE UNIQUE INDEX IF NOT EXISTS outbox_dedupe_key_uq ON outbox (dedupe_key);
 CREATE INDEX IF NOT EXISTS outbox_status_idx ON outbox (status);
