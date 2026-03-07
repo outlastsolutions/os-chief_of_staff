@@ -223,10 +223,18 @@ def _store_scoping(conn, request_id: str, scoping: dict) -> None:
         )
 
 
+def _get_thread_ts(conn, request_id: str) -> Optional[str]:
+    """Return the originating Slack thread_ts for a request, or None."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT thread_ts FROM requests WHERE request_id = %s", (request_id,))
+        row = cur.fetchone()
+    return row["thread_ts"] if row else None
+
+
 def _notify_slack(conn, request_id: str, title: str, scoping: dict) -> None:
     criteria = "\n".join(f"  • {c}" for c in scoping.get("acceptance_criteria", []))
     ambiguities = scoping.get("ambiguities", [])
-    ambi_text = ("\n⚠️ Ambiguities:\n" + "\n".join(f"  • {a}" for a in ambiguities)) if ambiguities else ""
+    ambi_text = ("\nAmbiguities:\n" + "\n".join(f"  • {a}" for a in ambiguities)) if ambiguities else ""
 
     text = (
         f"*[PM] New request scoped* — `{request_id}`\n"
@@ -235,29 +243,35 @@ def _notify_slack(conn, request_id: str, title: str, scoping: dict) -> None:
         f"*Acceptance criteria:*\n{criteria}"
         f"{ambi_text}"
     )
-    _enqueue_slack(conn, f"pm:scoped:{request_id}", text, agent="pm")
+    thread_ts = _get_thread_ts(conn, request_id)
+    _enqueue_slack(conn, f"pm:scoped:{request_id}", text, agent="pm", thread_ts=thread_ts)
 
 
 def _notify_slack_status(conn, request_id: str, title: str,
                          status: str, detail: Optional[str]) -> None:
-    icons = {"done": "✅", "blocked": "🚫", "cancelled": "❌"}
+    icons = {"done": ":white_check_mark:", "blocked": ":no_entry:", "cancelled": ":x:"}
     text = (
-        f"{icons.get(status, '•')} *[PM] Request {status}* — `{request_id}`\n"
+        f"{icons.get(status, '*')} *[PM] Request {status}* — `{request_id}`\n"
         f"*{title}*"
         + (f"\n{detail}" if detail else "")
     )
-    _enqueue_slack(conn, f"pm:{status}:{request_id}", text, agent="pm")
+    thread_ts = _get_thread_ts(conn, request_id)
+    _enqueue_slack(conn, f"pm:{status}:{request_id}", text, agent="pm", thread_ts=thread_ts)
 
 
-def _enqueue_slack(conn, dedupe_key: str, text: str, agent: str = "pm") -> None:
+def _enqueue_slack(conn, dedupe_key: str, text: str, agent: str = "pm",
+                   thread_ts: Optional[str] = None) -> None:
     """Queue a Slack post via the outbox so it survives Secretary downtime."""
     identity = AGENT_IDENTITY.get(agent, {"username": agent.title(), "icon_emoji": ":robot_face:"})
-    enqueue_outbox(conn, dedupe_key, "slack_post", {
+    payload: dict = {
         "channel":    SLACK_TASKS_CHANNEL,
         "text":       text,
         "username":   identity["username"],
         "icon_emoji": identity["icon_emoji"],
-    })
+    }
+    if thread_ts:
+        payload["thread_ts"] = thread_ts
+    enqueue_outbox(conn, dedupe_key, "slack_post", payload)
 
 
 def _log(conn, role: str, action: str, request_id: Optional[str] = None,

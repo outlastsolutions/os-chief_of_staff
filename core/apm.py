@@ -383,7 +383,15 @@ def _max_tool_calls(complexity: str) -> int:
     return {"low": 10, "medium": 20, "high": 40}.get(complexity, 20)
 
 
+def _get_thread_ts(conn, request_id: str):
+    with conn.cursor() as cur:
+        cur.execute("SELECT thread_ts FROM requests WHERE request_id = %s", (request_id,))
+        row = cur.fetchone()
+    return row["thread_ts"] if row else None
+
+
 def _notify_slack(conn, request_id: str, title: str, tasks: list[dict]) -> None:
+    from core.secretary_client import AGENT_IDENTITY
     task_lines = "\n".join(
         f"  `{t['task_id']}` {t['title']} [{t.get('complexity','?')}]"
         for t in tasks
@@ -391,13 +399,22 @@ def _notify_slack(conn, request_id: str, title: str, tasks: list[dict]) -> None:
     text = (
         f"*[APM] Request decomposed* — `{request_id}`\n"
         f"*{title}*\n"
-        f"{len(tasks)} tasks created:\n{task_lines}"
+        f"{len(tasks)} task(s) created:\n{task_lines}"
     )
+    identity = AGENT_IDENTITY.get("apm", {"username": "Chief of Staff · APM", "icon_emoji": ":clipboard:"})
+    thread_ts = _get_thread_ts(conn, request_id)
+    payload: dict = {
+        "channel":    SLACK_TASKS_CHANNEL,
+        "text":       text,
+        "username":   identity["username"],
+        "icon_emoji": identity["icon_emoji"],
+    }
+    if thread_ts:
+        payload["thread_ts"] = thread_ts
     try:
-        from core.secretary_client import notify
-        notify(SLACK_TASKS_CHANNEL, text, agent="apm")
+        enqueue_outbox(conn, f"apm:decomposed:{request_id}", "slack_post", payload)
     except Exception as e:
-        print(f"  [apm] Slack notify skipped (Secretary unavailable): {e}")
+        print(f"  [apm] Slack notify skipped: {e}")
 
 
 def _log(conn, role: str, action: str, request_id: Optional[str] = None,

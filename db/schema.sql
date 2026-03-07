@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS requests (
     requester       TEXT NOT NULL,          -- name of person/system
     source          TEXT NOT NULL,          -- 'slack' | 'cli' | 'api'
     channel         TEXT,                   -- slack channel or endpoint
+    thread_ts       TEXT,                   -- slack thread timestamp (for thread replies)
     business_unit   TEXT,                   -- e.g. 'xout', 'cyberlight'
     title           TEXT NOT NULL,
     description     TEXT NOT NULL,

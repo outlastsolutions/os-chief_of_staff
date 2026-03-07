@@ -150,6 +150,7 @@ def ingest(conn, lookback_hours: int = 24) -> int:
             "requester":       requester,
             "source":          "slack",
             "channel":         SLACK_TASKS_CHANNEL,
+            "thread_ts":       ts,
             "title":           parsed["title"],
             "description":     parsed["description"],
             "category":        category,

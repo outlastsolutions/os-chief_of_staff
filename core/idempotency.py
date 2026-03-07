@@ -27,11 +27,11 @@ def upsert_request(conn, request_data: dict) -> dict:
         cur.execute(
             """
             INSERT INTO requests (
-                request_id, idempotency_key, requester, source, channel,
+                request_id, idempotency_key, requester, source, channel, thread_ts,
                 business_unit, title, description, priority, category,
                 constraints, systems_involved, attachments, deadline
             ) VALUES (
-                %s, %s, %s, %s, %s,
+                %s, %s, %s, %s, %s, %s,
                 %s, %s, %s, %s, %s,
                 %s, %s, %s, %s
             )
@@ -45,6 +45,7 @@ def upsert_request(conn, request_data: dict) -> dict:
                 request_data["requester"],
                 request_data["source"],
                 request_data.get("channel"),
+                request_data.get("thread_ts"),
                 request_data.get("business_unit"),
                 request_data["title"],
                 request_data["description"],
