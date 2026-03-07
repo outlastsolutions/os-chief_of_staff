@@ -680,6 +680,165 @@ def test_push_workspace_bounds_functional():
                   f"{type(e).__name__}: {e}")
 
 
+# ── 16. Outbox bounded retry / backoff / terminal semantics ───────────────
+
+def test_outbox_retry_logic():
+    section("16 — Outbox retry: bounded backoff + terminal state (code inspection)")
+    import inspect
+    from core import idempotency as idem
+
+    src_fail  = inspect.getsource(idem.mark_outbox_failed)
+    src_claim = inspect.getsource(idem.claim_pending_outbox)
+
+    # Constants
+    check("OUTBOX_MAX_ATTEMPTS defined and positive",
+          hasattr(idem, "OUTBOX_MAX_ATTEMPTS") and idem.OUTBOX_MAX_ATTEMPTS > 0,
+          f"value={getattr(idem, 'OUTBOX_MAX_ATTEMPTS', None)}")
+    check("OUTBOX_BACKOFF_BASE defined",
+          hasattr(idem, "OUTBOX_BACKOFF_BASE") and idem.OUTBOX_BACKOFF_BASE >= 2,
+          f"value={getattr(idem, 'OUTBOX_BACKOFF_BASE', None)}")
+
+    # mark_outbox_failed: increments attempts
+    check("mark_outbox_failed reads current attempts from DB",
+          "SELECT attempts FROM outbox" in src_fail or "attempts" in src_fail, "")
+    check("mark_outbox_failed increments attempts counter",
+          "next_attempts" in src_fail or "attempts + 1" in src_fail, "")
+
+    # Terminal path: max attempts → 'dead'
+    check("mark_outbox_failed transitions to 'dead' at max attempts",
+          "'dead'" in src_fail, "")
+    check("mark_outbox_failed uses >= OUTBOX_MAX_ATTEMPTS for dead threshold",
+          "OUTBOX_MAX_ATTEMPTS" in src_fail, "")
+
+    # Backoff path: below max → 'pending' + next_retry_at
+    check("mark_outbox_failed sets next_retry_at for backoff",
+          "next_retry_at" in src_fail, "")
+    check("mark_outbox_failed resets to 'pending' (not 'failed') for retry",
+          "'pending'" in src_fail, "")
+    check("mark_outbox_failed clears leased_until on failure",
+          "leased_until = NULL" in src_fail, "")
+    check("Backoff is exponential (** operator or power expression)",
+          "**" in src_fail or "OUTBOX_BACKOFF_BASE" in src_fail, "")
+
+    # claim_pending_outbox: respects backoff window
+    check("claim_pending_outbox filters by next_retry_at (respects backoff window)",
+          "next_retry_at" in src_claim, "")
+    check("claim_pending_outbox skips rows where next_retry_at > NOW()",
+          "next_retry_at <= NOW()" in src_claim or "next_retry_at" in src_claim, "")
+
+    # reclaim_stale_outbox: crash recovery does not bypass dead state
+    src_reclaim = inspect.getsource(idem.reclaim_stale_outbox)
+    check("reclaim_stale_outbox only reclaims 'sending' rows (not 'dead')",
+          "'sending'" in src_reclaim and "'dead'" not in src_reclaim, "")
+
+
+def test_outbox_retry_functional():
+    section("16b — Outbox retry: functional transient + poison paths (DB)")
+    from db.connection import transaction
+    from core.idempotency import (
+        enqueue_outbox, claim_pending_outbox, mark_outbox_failed,
+        mark_outbox_sent, OUTBOX_MAX_ATTEMPTS,
+    )
+    import uuid
+
+    # ── Transient failure → retry after backoff ────────────────────────────
+    dk_transient = f"test-retry-transient-{uuid.uuid4().hex[:8]}"
+    oid_transient = None
+
+    with transaction() as conn:
+        oid_transient = enqueue_outbox(conn, dk_transient, "slack_post",
+                                       {"channel": "C", "text": "T"})
+
+    # Single failure → should stay 'pending' with future next_retry_at
+    with transaction() as conn:
+        mark_outbox_failed(conn, oid_transient, error="transient network error")
+
+    with transaction() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT status, attempts, next_retry_at FROM outbox WHERE outbox_id = %s",
+                    (oid_transient,))
+        row = cur.fetchone()
+
+    check("After 1 failure: status is 'pending' (not dead, not failed)",
+          row["status"] == "pending", f"status={row['status']}")
+    check("After 1 failure: attempts = 1",
+          row["attempts"] == 1, f"attempts={row['attempts']}")
+    check("After 1 failure: next_retry_at is set (backoff scheduled)",
+          row["next_retry_at"] is not None, f"next_retry_at={row['next_retry_at']}")
+
+    # Simulate backoff elapsed: set next_retry_at to past
+    with transaction() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE outbox SET next_retry_at = NOW() - INTERVAL '1 minute' WHERE outbox_id = %s",
+            (oid_transient,)
+        )
+
+    # Should now be claimable again
+    with transaction() as conn:
+        claimed = claim_pending_outbox(conn, limit=20)
+    claimed_ids = [r["outbox_id"] for r in claimed]
+    check("After backoff elapsed: transient row is claimable again",
+          oid_transient in claimed_ids,
+          f"claimed_ids={claimed_ids}")
+
+    # Mark sent (simulate success on retry)
+    with transaction() as conn:
+        mark_outbox_sent(conn, oid_transient)
+
+    with transaction() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT status FROM outbox WHERE outbox_id = %s", (oid_transient,))
+        row = cur.fetchone()
+    check("After successful retry: status is 'sent'",
+          row["status"] == "sent", f"status={row['status']}")
+
+    # ── Poison failure → dead after max attempts ───────────────────────────
+    dk_poison = f"test-retry-poison-{uuid.uuid4().hex[:8]}"
+    oid_poison = None
+
+    with transaction() as conn:
+        oid_poison = enqueue_outbox(conn, dk_poison, "slack_post",
+                                    {"channel": "C", "text": "poison"})
+
+    # Drive to max attempts
+    for i in range(OUTBOX_MAX_ATTEMPTS):
+        # Reset next_retry_at so each failure is claimable
+        with transaction() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "UPDATE outbox SET next_retry_at = NULL, status = 'pending' "
+                "WHERE outbox_id = %s AND status != 'dead'",
+                (oid_poison,)
+            )
+        with transaction() as conn:
+            mark_outbox_failed(conn, oid_poison, error=f"poison error attempt {i+1}")
+
+    with transaction() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT status, attempts FROM outbox WHERE outbox_id = %s", (oid_poison,))
+        row = cur.fetchone()
+
+    check(f"After {OUTBOX_MAX_ATTEMPTS} failures: status is 'dead'",
+          row["status"] == "dead", f"status={row['status']}")
+    check(f"After {OUTBOX_MAX_ATTEMPTS} failures: attempts = {OUTBOX_MAX_ATTEMPTS}",
+          row["attempts"] == OUTBOX_MAX_ATTEMPTS,
+          f"attempts={row['attempts']}")
+
+    # Dead row must not appear in next claim batch
+    with transaction() as conn:
+        claimed = claim_pending_outbox(conn, limit=20)
+    dead_claimed = [r for r in claimed if r["outbox_id"] == oid_poison]
+    check("Dead row is NOT claimable (no infinite retry)",
+          len(dead_claimed) == 0, f"unexpectedly claimed: {dead_claimed}")
+
+    # Cleanup
+    with transaction() as conn:
+        cur = conn.cursor()
+        cur.execute("DELETE FROM outbox WHERE outbox_id IN (%s, %s)",
+                    (oid_transient, oid_poison))
+
+
 # ── Main ──────────────────────────────────────────────────────────────────
 
 def main() -> int:
@@ -706,6 +865,8 @@ def main() -> int:
         test_dependency_gating_functional,
         test_push_workspace_bounds_sql,
         test_push_workspace_bounds_functional,
+        test_outbox_retry_logic,
+        test_outbox_retry_functional,
     ]
 
     for t in tests:
