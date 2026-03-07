@@ -69,7 +69,7 @@ def _setup(conn) -> None:
 
 def _teardown(conn) -> None:
     cur = conn.cursor()
-    for tid in _TASKS:
+    for tid in [*_TASKS, "TASK-REGR-D"]:
         cur.execute("DELETE FROM tasks WHERE task_id = %s", (tid,))
     cur.execute("DELETE FROM requests WHERE request_id = %s", (_REQ_ID,))
     cur.execute("DELETE FROM outbox WHERE dedupe_key LIKE 'regr-%'")
@@ -147,6 +147,36 @@ def test_dep_ordering(conn) -> None:
     conn.commit()
     cur.execute(f"SELECT task_id FROM tasks t WHERE t.task_id = %s AND {_DEP_GATE}", (tc,))
     check("C claimable after B=done", cur.fetchone() is not None)
+
+    # INSERT regression: trigger must block direct INSERT with status='executing' when dep not done
+    # C is still 'planned', so inserting D (dep on C) as 'executing' must be rejected.
+    try:
+        cur.execute("""
+            INSERT INTO tasks (task_id, request_id, assigned_director, title, description, status, dependencies)
+            VALUES ('TASK-REGR-D', %s, 'development', 'Task D', 'Task D', 'executing', %s::jsonb)
+        """, (_REQ_ID, f'["{tc}"]'))
+        conn.commit()
+        check("Trigger blocks INSERT D→executing when C not done", False, "exception not raised")
+    except psycopg2.errors.RaiseException as e:
+        conn.rollback()
+        check("Trigger blocks INSERT D→executing when C not done",
+              "dependency_order_violation" in str(e), str(e)[:80])
+
+    # Mark C done; INSERT D with status='executing' must now be allowed.
+    cur.execute("UPDATE tasks SET status = 'done' WHERE task_id = %s", (tc,))
+    conn.commit()
+    try:
+        cur.execute("""
+            INSERT INTO tasks (task_id, request_id, assigned_director, title, description, status, dependencies)
+            VALUES ('TASK-REGR-D', %s, 'development', 'Task D', 'Task D', 'executing', %s::jsonb)
+        """, (_REQ_ID, f'["{tc}"]'))
+        conn.commit()
+        check("Trigger allows INSERT D→executing when C=done", True)
+        cur.execute("DELETE FROM tasks WHERE task_id = 'TASK-REGR-D'")
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        check("Trigger allows INSERT D→executing when C=done", False, str(e)[:80])
 
 
 # ── Scenario 2: Stale outbox recovery ─────────────────────────────────────

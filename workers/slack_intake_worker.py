@@ -38,6 +38,11 @@ def poll_once(lookback_hours: int = 24) -> int:
 def run(poll_interval: int = DEFAULT_POLL_INTERVAL,
         once: bool = False,
         lookback_hours: int = 24) -> None:
+    import traceback
+
+    if poll_interval <= 0:
+        raise ValueError(f"poll_interval must be > 0, got {poll_interval}")
+
     if once:
         n = poll_once(lookback_hours=lookback_hours)
         print(f"[slack_intake_worker] ingested {n} new request(s).")
@@ -52,6 +57,7 @@ def run(poll_interval: int = DEFAULT_POLL_INTERVAL,
                 print(f"  [slack_intake] {n} new request(s) ingested")
         except Exception as e:
             print(f"  [slack_intake] poll error: {e}")
+            traceback.print_exc()
         time.sleep(poll_interval)
 
 

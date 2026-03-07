@@ -87,11 +87,17 @@ def dispatch(item: dict) -> str:
 
 # ── Poll loop ─────────────────────────────────────────────────────────────
 
-def drain_once() -> int:
+def drain_once() -> tuple[int, int, int]:
     """
     Claim and dispatch one batch of pending outbox items.
     Reclaims any stale 'sending' rows first (recovery from prior worker crash).
-    Returns the number of items processed.
+
+    Delivery semantics: at-least-once. If the worker crashes between dispatch()
+    and mark_outbox_sent(), reclaim_stale_outbox() will reset the row to 'pending'
+    and it will be re-sent. Consumers of outbox side-effects (Slack, email) should
+    tolerate occasional duplicate delivery.
+
+    Returns (attempted, sent, failed).
     """
     with transaction() as conn:
         reclaimed = reclaim_stale_outbox(conn)
@@ -99,35 +105,46 @@ def drain_once() -> int:
             print(f"  [outbox] reclaimed {reclaimed} stale sending row(s)")
         items = claim_pending_outbox(conn, limit=BATCH_SIZE)
 
-    processed = 0
+    attempted = sent = failed = 0
     for item in items:
         oid = item["outbox_id"]
+        attempted += 1
         try:
             result = dispatch(item)
             with transaction() as conn:
                 mark_outbox_sent(conn, oid)
             print(f"  [outbox] sent  #{oid} ({item['type']}) → {result}")
+            sent += 1
         except Exception as e:
+            import traceback
             with transaction() as conn:
                 mark_outbox_failed(conn, oid, error=str(e))
             print(f"  [outbox] FAIL  #{oid} ({item['type']}): {e}")
-        processed += 1
+            traceback.print_exc()
+            failed += 1
 
-    return processed
+    return attempted, sent, failed
 
 
 def run(poll_interval: int = DEFAULT_POLL_INTERVAL, once: bool = False) -> None:
+    if poll_interval <= 0:
+        raise ValueError(f"poll_interval must be > 0, got {poll_interval}")
+
     if once:
-        n = drain_once()
-        print(f"[outbox_worker] drained {n} item(s).")
+        attempted, sent, failed = drain_once()
+        print(f"[outbox_worker] drained — attempted={attempted} sent={sent} failed={failed}")
         return
 
     print(f"[outbox_worker] starting — polling every {poll_interval}s")
     while True:
         try:
-            drain_once()
+            attempted, sent, failed = drain_once()
+            if attempted:
+                print(f"  [outbox] cycle — attempted={attempted} sent={sent} failed={failed}")
         except Exception as e:
+            import traceback
             print(f"  [outbox] poll error: {e}")
+            traceback.print_exc()
         time.sleep(poll_interval)
 
 

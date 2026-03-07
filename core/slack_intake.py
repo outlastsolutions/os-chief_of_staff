@@ -8,6 +8,7 @@ Each cycle, fetches messages from the last 24h and skips any already in requests
 from __future__ import annotations
 
 import re
+import uuid
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
@@ -33,15 +34,6 @@ def _get_bot_user_id() -> Optional[str]:
         return _BOT_ID_CACHE
     except Exception:
         return None
-
-
-def _already_ingested(conn, idempotency_key: str) -> bool:
-    with conn.cursor() as cur:
-        cur.execute(
-            "SELECT 1 FROM requests WHERE idempotency_key = %s LIMIT 1",
-            (idempotency_key,)
-        )
-        return cur.fetchone() is not None
 
 
 def _parse_message(text: str) -> dict:
@@ -135,9 +127,6 @@ def ingest(conn, lookback_hours: int = 24) -> int:
         ts = msg.get("ts", "")
         idem_key = f"slack-{ts}"
 
-        if _already_ingested(conn, idem_key):
-            continue
-
         parsed = _parse_message(text)
         if not parsed:
             continue
@@ -145,7 +134,11 @@ def ingest(conn, lookback_hours: int = 24) -> int:
         requester = msg.get("user", "unknown")
         category  = _infer_category(text)
 
+        # Pre-generate a request_id so we can detect whether upsert_request
+        # created a new row vs. returned the existing one (atomic idempotency).
+        local_req_id = f"REQ-{uuid.uuid4().hex[:8].upper()}"
         req = receive_request(conn, {
+            "request_id":      local_req_id,
             "idempotency_key": idem_key,
             "requester":       requester,
             "source":          "slack",
@@ -156,12 +149,16 @@ def ingest(conn, lookback_hours: int = 24) -> int:
             "category":        category,
             "priority":        "medium",
         })
+        is_new = req["request_id"] == local_req_id
+        if not is_new:
+            continue  # already ingested by another worker — skip confirmation reply
+
         conn.commit()
         created += 1
 
         print(f"  [slack_intake] new request {req['request_id']} — {parsed['title'][:60]}")
 
-        # Thread reply to confirm intake
+        # Thread reply to confirm intake — only sent when we actually created the row
         _reply_thread(
             SLACK_TASKS_CHANNEL,
             ts,

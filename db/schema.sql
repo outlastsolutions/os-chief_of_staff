@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS requests (
     deadline        TIMESTAMPTZ,
     status          TEXT NOT NULL DEFAULT 'received',
     -- received | scoped | in_progress | done | blocked | cancelled
+    blocked_reason  TEXT,
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
@@ -250,8 +251,13 @@ CREATE INDEX IF NOT EXISTS artifacts_task_id_idx ON artifacts (task_id);
 CREATE OR REPLACE FUNCTION enforce_task_dep_order()
 RETURNS TRIGGER AS $$
 BEGIN
-    -- Only check on transitions into 'executing' from a non-executing state.
-    IF NEW.status = 'executing' AND OLD.status IS DISTINCT FROM 'executing' THEN
+    -- Fire on INSERT or UPDATE into status='executing'.
+    -- For UPDATE: skip if already executing (heartbeat/lease extension).
+    -- For INSERT: always check when status='executing' (direct inserts bypassed UPDATE trigger).
+    IF NEW.status = 'executing' THEN
+        IF TG_OP = 'UPDATE' AND OLD.status = 'executing' THEN
+            RETURN NEW;  -- lease extension only — no dep re-check needed
+        END IF;
         IF EXISTS (
             SELECT 1
             FROM jsonb_array_elements_text(COALESCE(NEW.dependencies, '[]'::jsonb)) AS dep
@@ -270,6 +276,6 @@ $$ LANGUAGE plpgsql;
 
 DROP TRIGGER IF EXISTS trg_enforce_task_dep_order ON tasks;
 CREATE TRIGGER trg_enforce_task_dep_order
-    BEFORE UPDATE ON tasks
+    BEFORE INSERT OR UPDATE ON tasks
     FOR EACH ROW
     EXECUTE FUNCTION enforce_task_dep_order();

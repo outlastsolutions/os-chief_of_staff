@@ -116,8 +116,12 @@ def execute_task(conn, agent_id: str,
 
         artifacts, logs = _execute_steps(conn, tid, agent_id, task, plan, dod, workspace)
 
+        if not release_to_verifying(conn, tid, agent_id):
+            raise _BuilderError(
+                "release_to_verifying matched 0 rows — lease lost or task in wrong state.",
+                FailureCode.LEASE_LOST,
+            )
         report = _create_report(conn, tid, agent_id, "completed", artifacts, logs)
-        release_to_verifying(conn, tid, agent_id)
         print(f"  [builder:{agent_id}] {tid} → verifying ({len(artifacts)} artifacts)")
         return report
 
@@ -373,7 +377,10 @@ def _execute_steps(conn, task_id: str, agent_id: str,
                 exec_result = f"[note] {content[:200]}"
 
             else:
-                exec_result = f"[unknown tool: {tool}] — skipped"
+                raise _BuilderError(
+                    f"Unknown tool '{tool}' at step {order} — plan contains an invalid tool name.",
+                    FailureCode.TOOL_FAILURE,
+                )
 
             step_results.append({
                 "order": order, "tool": tool,

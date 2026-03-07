@@ -156,12 +156,20 @@ def fail_task(conn, task_id: str, agent_id: str, reason: str,
                 plan_id         = NULL,
                 tool_calls_used = 0,
                 updated_at      = NOW()
-            WHERE task_id = %s
+            WHERE task_id = %s AND leased_by = %s
             RETURNING *
             """,
-            (next_status, blocked_reason, failure_code, task_id)
+            (next_status, blocked_reason, failure_code, task_id, agent_id)
         )
         updated = cur.fetchone()
+        if updated is None:
+            # Lease already gone — another agent took over; log and return gracefully.
+            _log(conn, agent_id, "builder", "lease:fail_task:lease_already_gone", task_id,
+                 {"reason": reason, "failure_code": failure_code})
+            with conn.cursor() as cur2:
+                cur2.execute("SELECT * FROM tasks WHERE task_id = %s", (task_id,))
+                fallback = cur2.fetchone()
+            return dict(fallback) if fallback else {"task_id": task_id}
         if next_status == "planned":
             # Clear plan so planner re-plans with failure context
             cur.execute("DELETE FROM plans WHERE task_id = %s", (task_id,))

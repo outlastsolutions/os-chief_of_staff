@@ -280,10 +280,15 @@ def _transition_done(conn, task_id: str, agent_id: str) -> None:
             UPDATE tasks
             SET status = 'done', leased_by = NULL, leased_until = NULL,
                 updated_at = NOW()
-            WHERE task_id = %s AND status = 'verifying'
+            WHERE task_id = %s AND status = 'verifying' AND leased_by = %s
             """,
-            (task_id,)
+            (task_id, agent_id)
         )
+        if cur.rowcount == 0:
+            raise RuntimeError(
+                f"_transition_done: 0 rows updated for {task_id} — "
+                "lease may have been stolen or task already transitioned."
+            )
         cur.execute(
             """
             INSERT INTO agent_logs (agent_name, role, action, task_id, log_data)
@@ -307,10 +312,15 @@ def _transition_back_to_builder(conn, task_id: str, agent_id: str, issues: str) 
                 plan_id         = NULL,
                 tool_calls_used = 0,
                 updated_at      = NOW()
-            WHERE task_id = %s AND status = 'verifying'
+            WHERE task_id = %s AND status = 'verifying' AND leased_by = %s
             """,
-            (f"[Auditor issues]: {issues}", task_id)
+            (f"[Auditor issues]: {issues}", task_id, agent_id)
         )
+        if cur.rowcount == 0:
+            raise RuntimeError(
+                f"_transition_back_to_builder: 0 rows updated for {task_id} — "
+                "lease may have been stolen or task already transitioned."
+            )
         cur.execute("DELETE FROM plans WHERE task_id = %s", (task_id,))
         cur.execute(
             """

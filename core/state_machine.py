@@ -192,11 +192,12 @@ def transition_request(conn, request_id: str, role: str, to_state: str,
             """
             UPDATE requests
             SET status = %s,
+                blocked_reason = %s,
                 updated_at = NOW()
             WHERE request_id = %s
             RETURNING *
             """,
-            (to_state, request_id)
+            (to_state, blocked_reason, request_id)
         )
         updated = cur.fetchone()
 
