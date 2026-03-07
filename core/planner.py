@@ -40,6 +40,9 @@ Rules:
 - List risks: what could go wrong, and how to handle it.
 - Keep estimated_tool_calls realistic and within the task budget.
 - Tools available: github_api, web_search, file_edit, code_run, slack_api, docs_api, shell
+- github_api content must be a JSON string: {"action":"create_file|update_file|push_workspace|create_pr|get_file|list_files","repo":"owner/repo","path":"file/path","content":"...","message":"commit msg","branch":"main"}
+- For coding tasks: use file_edit to write code locally, then github_api push_workspace to push all files to the repo at once
+- push_workspace is preferred over individual create_file calls for multi-file outputs
 
 Respond with valid JSON only."""
 

@@ -46,6 +46,7 @@ Rules:
 - code_run: provide executable Python code only (no shell commands, no markdown).
 - shell: provide the exact shell command string.
 - web_search: provide the exact search query string.
+- github_api: provide a JSON string: {"action":"create_file|update_file|push_workspace|create_pr","repo":"owner/repo","path":"file/path","content":"...","message":"commit msg","branch":"main"}. For push_workspace, omit path/content — all files in the task workspace are pushed automatically.
 - docs_api: provide {"title": "...", "content": "..."}.
 - none: provide a brief note (nothing is executed).
 - Use results from previous steps to inform your output — adapt if something failed.
@@ -291,6 +292,11 @@ def _execute_steps(conn, task_id: str, agent_id: str,
                 artifacts.append({"type": "research", "query": content,
                                    "snippet": exec_result[:500]})
 
+            elif tool == "github_api":
+                exec_result = _tool_github_api(content, resource, workspace)
+                artifacts.append({"type": "github", "resource": resource,
+                                   "output": exec_result[:500]})
+
             elif tool == "docs_api":
                 exec_result = f"[docs_api] would create/update doc: {resource}"
 
@@ -398,6 +404,143 @@ def _tool_web_search(query: str) -> str:
     text = re.sub(r"<[^>]+>", " ", html)
     text = re.sub(r"\s+", " ", text).strip()
     return text[:800]
+
+
+def _tool_github_api(content: str, resource: str, workspace: str) -> str:
+    """
+    Interact with GitHub REST API.
+    `content` must be a JSON string with:
+      action: create_file | update_file | push_workspace | create_pr | get_file | list_files
+      repo:   "owner/repo"  (or just "repo" — GITHUB_ORG is prepended)
+      path:   file path in the repo
+      content: file content (for create/update)
+      message: commit message
+      branch:  target branch (default: main)
+      pr_title / pr_body / base_branch: for create_pr
+      local_dir: for push_workspace — push all files from a local dir to repo
+    """
+    import base64
+    import requests as _req
+
+    from config.settings import GITHUB_TOKEN, GITHUB_ORG
+
+    if not GITHUB_TOKEN:
+        return "[github_api] GITHUB_TOKEN not configured — skipped"
+
+    try:
+        params = json.loads(content) if content else {}
+    except json.JSONDecodeError:
+        params = {"action": "create_file", "content": content, "path": resource}
+
+    action  = params.get("action", "create_file")
+    repo    = params.get("repo", resource or "")
+    if repo and "/" not in repo:
+        repo = f"{GITHUB_ORG}/{repo}"
+
+    branch  = params.get("branch", "main")
+    headers = {
+        "Authorization": f"Bearer {GITHUB_TOKEN}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    base_url = f"https://api.github.com/repos/{repo}"
+
+    if action == "list_files":
+        path = params.get("path", "")
+        r = _req.get(f"{base_url}/contents/{path}",
+                     headers=headers, params={"ref": branch}, timeout=15)
+        r.raise_for_status()
+        items = [f["path"] for f in r.json() if isinstance(f, dict)]
+        return f"Files in {repo}/{path}: {', '.join(items[:20])}"
+
+    elif action == "get_file":
+        path = params.get("path", "")
+        r = _req.get(f"{base_url}/contents/{path}",
+                     headers=headers, params={"ref": branch}, timeout=15)
+        r.raise_for_status()
+        data = r.json()
+        decoded = base64.b64decode(data["content"]).decode("utf-8", errors="replace")
+        return f"Content of {path}:\n{decoded[:1000]}"
+
+    elif action in ("create_file", "update_file"):
+        path    = params.get("path", resource or "")
+        message = params.get("message", f"chore: update {path} via CoS builder")
+        fc      = params.get("content", "")
+
+        # Check if file exists to get SHA (needed for update)
+        sha = None
+        r_check = _req.get(f"{base_url}/contents/{path}",
+                           headers=headers, params={"ref": branch}, timeout=10)
+        if r_check.status_code == 200:
+            sha = r_check.json().get("sha")
+
+        body: dict = {
+            "message": message,
+            "content": base64.b64encode(fc.encode()).decode(),
+            "branch":  branch,
+        }
+        if sha:
+            body["sha"] = sha
+
+        r = _req.put(f"{base_url}/contents/{path}",
+                     headers=headers, json=body, timeout=15)
+        r.raise_for_status()
+        verb = "Updated" if sha else "Created"
+        return f"{verb} {repo}/{path} on {branch}"
+
+    elif action == "push_workspace":
+        # Push all files from a local directory (or the task workspace) to a repo branch
+        local_dir = params.get("local_dir") or workspace
+        message   = params.get("message", "feat: builder output via CoS")
+        pushed    = []
+        errors    = []
+        for root, dirs, files in os.walk(local_dir):
+            dirs[:] = [d for d in dirs if d != ".git"]
+            for fname in files:
+                abs_path = os.path.join(root, fname)
+                rel_path = os.path.relpath(abs_path, local_dir)
+                try:
+                    with open(abs_path, "rb") as f:
+                        raw = f.read()
+                    sha = None
+                    r_check = _req.get(f"{base_url}/contents/{rel_path}",
+                                       headers=headers, params={"ref": branch}, timeout=10)
+                    if r_check.status_code == 200:
+                        sha = r_check.json().get("sha")
+                    body = {
+                        "message": f"{message} — {rel_path}",
+                        "content": base64.b64encode(raw).decode(),
+                        "branch":  branch,
+                    }
+                    if sha:
+                        body["sha"] = sha
+                    r = _req.put(f"{base_url}/contents/{rel_path}",
+                                 headers=headers, json=body, timeout=15)
+                    r.raise_for_status()
+                    pushed.append(rel_path)
+                except Exception as e:
+                    errors.append(f"{rel_path}: {e}")
+        result = f"Pushed {len(pushed)} file(s) to {repo}/{branch}"
+        if errors:
+            result += f" | {len(errors)} error(s): {'; '.join(errors[:3])}"
+        return result
+
+    elif action == "create_pr":
+        head        = params.get("head_branch", branch)
+        base_branch = params.get("base_branch", "main")
+        pr_title    = params.get("pr_title", "CoS builder output")
+        pr_body     = params.get("pr_body", "Automated PR created by CoS Builder agent.")
+        r = _req.post(f"{base_url}/pulls",
+                      headers=headers,
+                      json={"title": pr_title, "body": pr_body,
+                            "head": head, "base": base_branch},
+                      timeout=15)
+        r.raise_for_status()
+        pr = r.json()
+        return f"PR #{pr['number']} created: {pr['html_url']}"
+
+    else:
+        return f"[github_api] unknown action: {action}"
 
 
 # ── Execution report ──────────────────────────────────────────────────────

@@ -26,3 +26,7 @@ SLACK_TASKS_CHANNEL = os.getenv("SLACK_TASKS_CHANNEL", "C0AJL6RCYKU")
 # ── Secretary integration ─────────────────────────────────────────────────
 SECRETARY_URL     = os.getenv("SECRETARY_URL", "http://localhost:8000")
 SECRETARY_API_KEY = os.getenv("SECRETARY_API_KEY", "")
+
+# ── GitHub ─────────────────────────────────────────────────────────────────
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")       # Personal access token
+GITHUB_ORG   = os.getenv("GITHUB_ORG", "outlastsolutions")
