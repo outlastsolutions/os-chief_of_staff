@@ -86,14 +86,15 @@ class _BuilderError(Exception):
 
 def execute_task(conn, agent_id: str,
                  director: Optional[str] = None,
-                 task_id: Optional[str] = None) -> Optional[dict]:
+                 task_id: Optional[str] = None,
+                 request_id: Optional[str] = None) -> Optional[dict]:
     """
     Claim and execute one task.
     If task_id is given, targets that specific task.
     Otherwise claims the next available planned+planned task.
     Returns the execution report dict, or None if nothing to claim.
     """
-    task = _claim(conn, agent_id, director, task_id)
+    task = _claim(conn, agent_id, director, task_id, request_id)
     if not task:
         return None
 
@@ -152,8 +153,12 @@ def get_report(conn, task_id: str) -> Optional[dict]:
 
 # ── Claim ─────────────────────────────────────────────────────────────────
 
+_BUILDER_LEASE_MINUTES = 10
+
+
 def _claim(conn, agent_id: str, director: Optional[str],
-           task_id: Optional[str]) -> Optional[dict]:
+           task_id: Optional[str],
+           request_id: Optional[str] = None) -> Optional[dict]:
     # Dependency gate: only tasks whose every dependency is done are claimable.
     _DEP_GATE = """
         NOT EXISTS (
@@ -166,26 +171,37 @@ def _claim(conn, agent_id: str, director: Optional[str],
 
     if task_id:
         # Direct claim of a specific task
+        req_clause = "AND t.request_id = %s" if request_id else ""
+        params = [agent_id, _BUILDER_LEASE_MINUTES, task_id]
+        if request_id:
+            params.append(request_id)
         with conn.cursor() as cur:
             cur.execute(
                 f"""
                 UPDATE tasks t
                 SET status = 'executing', leased_by = %s,
-                    leased_until = NOW() + INTERVAL '10 minutes',
+                    leased_until = NOW() + (%s * INTERVAL '1 minute'),
                     attempt = attempt + 1, updated_at = NOW()
                 WHERE t.task_id = %s AND t.status = 'planned' AND t.plan_id IS NOT NULL
                   AND (t.leased_until IS NULL OR t.leased_until < NOW())
+                  {req_clause}
                   AND {_DEP_GATE}
                 RETURNING t.*
                 """,
-                (agent_id, task_id)
+                params
             )
             row = cur.fetchone()
         return dict(row) if row else None
     else:
         # Claim next available task with a plan and all dependencies satisfied
         director_clause = "AND t.assigned_director = %s" if director else ""
-        params = [director, agent_id] if director else [agent_id]
+        req_clause      = "AND t.request_id = %s" if request_id else ""
+        params = []
+        if director:
+            params.append(director)
+        if request_id:
+            params.append(request_id)
+        params += [agent_id, _BUILDER_LEASE_MINUTES]
         with conn.cursor() as cur:
             cur.execute(
                 f"""
@@ -194,6 +210,7 @@ def _claim(conn, agent_id: str, director: Optional[str],
                     WHERE t.status = 'planned' AND t.plan_id IS NOT NULL
                       AND (t.leased_until IS NULL OR t.leased_until < NOW())
                       {director_clause}
+                      {req_clause}
                       AND {_DEP_GATE}
                     ORDER BY t.created_at
                     FOR UPDATE SKIP LOCKED
@@ -201,7 +218,7 @@ def _claim(conn, agent_id: str, director: Optional[str],
                 )
                 UPDATE tasks t
                 SET status = 'executing', leased_by = %s,
-                    leased_until = NOW() + INTERVAL '10 minutes',
+                    leased_until = NOW() + (%s * INTERVAL '1 minute'),
                     attempt = attempt + 1, updated_at = NOW()
                 FROM candidate
                 WHERE t.task_id = candidate.task_id

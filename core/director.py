@@ -89,7 +89,7 @@ def run_domain(conn, domain: str, request_id: Optional[str] = None,
         # 2. Build the next planned task (must have a plan attached)
         report = builder_agent.execute_task(
             conn, agent_id=f"builder:{domain}",
-            director=domain, task_id=None
+            director=domain, task_id=None, request_id=request_id
         )
         if report:
             results["built"] += 1
@@ -105,7 +105,7 @@ def run_domain(conn, domain: str, request_id: Optional[str] = None,
         # 3. Verify the next verifying task
         vrep = auditor_agent.verify_task(
             conn, agent_id=f"auditor:{domain}",
-            director=domain
+            director=domain, request_id=request_id
         )
         if vrep:
             if vrep["result"] == "pass":

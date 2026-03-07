@@ -122,7 +122,7 @@ def claim_pending_outbox(conn, limit: int = 10) -> list[dict]:
             """
             UPDATE outbox
             SET status = 'sending',
-                leased_until = NOW() + INTERVAL '%s minutes'
+                leased_until = NOW() + (%s * INTERVAL '1 minute')
             WHERE outbox_id IN (
                 SELECT outbox_id FROM outbox
                 WHERE status = 'pending'

@@ -61,14 +61,14 @@ def claim_task(conn, agent_id: str, director: Optional[str] = None,
             UPDATE tasks t
             SET status       = 'executing',
                 leased_by    = %s,
-                leased_until = NOW() + INTERVAL '{LEASE_MINUTES} minutes',
+                leased_until = NOW() + (%s * INTERVAL '1 minute'),
                 attempt      = attempt + 1,
                 updated_at   = NOW()
             FROM candidate
             WHERE t.task_id = candidate.task_id
             RETURNING t.*
             """,
-            params + [agent_id]
+            params + [agent_id, LEASE_MINUTES]
         )
         row = cur.fetchone()
 
@@ -85,14 +85,14 @@ def heartbeat(conn, task_id: str, agent_id: str) -> bool:
     """
     with conn.cursor() as cur:
         cur.execute(
-            f"""
+            """
             UPDATE tasks
-            SET leased_until = NOW() + INTERVAL '{LEASE_MINUTES} minutes',
+            SET leased_until = NOW() + (%s * INTERVAL '1 minute'),
                 updated_at   = NOW()
             WHERE task_id = %s AND leased_by = %s AND status = 'executing'
             RETURNING task_id
             """,
-            (task_id, agent_id)
+            (LEASE_MINUTES, task_id, agent_id)
         )
         ok = cur.fetchone() is not None
 
@@ -211,7 +211,7 @@ def acquire_resource_lock(conn, lock_key: str, owner: str,
         cur.execute(
             """
             INSERT INTO resource_locks (lock_key, owner, leased_until)
-            VALUES (%s, %s, NOW() + INTERVAL '%s minutes')
+            VALUES (%s, %s, NOW() + (%s * INTERVAL '1 minute'))
             ON CONFLICT (lock_key) DO UPDATE
                 SET owner        = EXCLUDED.owner,
                     leased_until = EXCLUDED.leased_until

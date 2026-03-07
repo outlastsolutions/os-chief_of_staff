@@ -27,6 +27,7 @@ from config.settings import AUDITOR_MODEL
 from core.llm import chat_json
 from core.lease import claim_task, heartbeat
 
+AUDITOR_LEASE_MINUTES = 10
 
 AUDITOR_SYSTEM = """You are the Auditor Agent for Outlast Solutions LLC.
 Your job is to verify that a Builder's execution report satisfies the task's Definition of Done.
@@ -64,14 +65,15 @@ Respond with valid JSON only:
 
 def verify_task(conn, agent_id: str,
                 director: Optional[str] = None,
-                task_id: Optional[str] = None) -> Optional[dict]:
+                task_id: Optional[str] = None,
+                request_id: Optional[str] = None) -> Optional[dict]:
     """
     Claim and verify one task in 'verifying' state.
     If task_id is given, targets that specific task.
     Otherwise claims the next available verifying task.
     Returns the verification report dict, or None if nothing to claim.
     """
-    task = _claim_verifying(conn, agent_id, director, task_id)
+    task = _claim_verifying(conn, agent_id, director, task_id, request_id)
     if not task:
         return None
 
@@ -110,7 +112,7 @@ def verify_task(conn, agent_id: str,
         tb = traceback.format_exc()
         print(f"  [auditor:{agent_id}] {tid} error: {e}")
         # Release lease without changing state — task stays in verifying for retry
-        _release_lease(conn, tid)
+        _release_lease(conn, tid, agent_id)
         raise
 
 
@@ -127,26 +129,38 @@ def get_verification_report(conn, task_id: str) -> Optional[dict]:
 # ── Claim ──────────────────────────────────────────────────────────────────
 
 def _claim_verifying(conn, agent_id: str, director: Optional[str],
-                     task_id: Optional[str]) -> Optional[dict]:
+                     task_id: Optional[str],
+                     request_id: Optional[str] = None) -> Optional[dict]:
     if task_id:
+        req_clause = "AND request_id = %s" if request_id else ""
+        params = [agent_id, AUDITOR_LEASE_MINUTES, task_id]
+        if request_id:
+            params.append(request_id)
         with conn.cursor() as cur:
             cur.execute(
-                """
+                f"""
                 UPDATE tasks
                 SET leased_by = %s,
-                    leased_until = NOW() + INTERVAL '10 minutes',
+                    leased_until = NOW() + (%s * INTERVAL '1 minute'),
                     updated_at = NOW()
                 WHERE task_id = %s AND status = 'verifying'
                   AND (leased_until IS NULL OR leased_until < NOW())
+                  {req_clause}
                 RETURNING *
                 """,
-                (agent_id, task_id)
+                params
             )
             row = cur.fetchone()
         return dict(row) if row else None
     else:
         director_clause = "AND assigned_director = %s" if director else ""
-        params = ([director, agent_id] if director else [agent_id])
+        req_clause      = "AND request_id = %s" if request_id else ""
+        params = []
+        if director:
+            params.append(director)
+        if request_id:
+            params.append(request_id)
+        params += [agent_id, AUDITOR_LEASE_MINUTES]
         with conn.cursor() as cur:
             cur.execute(
                 f"""
@@ -155,13 +169,14 @@ def _claim_verifying(conn, agent_id: str, director: Optional[str],
                     WHERE status = 'verifying'
                       AND (leased_until IS NULL OR leased_until < NOW())
                       {director_clause}
+                      {req_clause}
                     ORDER BY updated_at
                     FOR UPDATE SKIP LOCKED
                     LIMIT 1
                 )
                 UPDATE tasks t
                 SET leased_by = %s,
-                    leased_until = NOW() + INTERVAL '10 minutes',
+                    leased_until = NOW() + (%s * INTERVAL '1 minute'),
                     updated_at = NOW()
                 FROM candidate
                 WHERE t.task_id = candidate.task_id
@@ -331,11 +346,14 @@ def _transition_back_to_builder(conn, task_id: str, agent_id: str, issues: str) 
         )
 
 
-def _release_lease(conn, task_id: str) -> None:
+def _release_lease(conn, task_id: str, agent_id: str) -> None:
     with conn.cursor() as cur:
         cur.execute(
-            "UPDATE tasks SET leased_by = NULL, leased_until = NULL WHERE task_id = %s",
-            (task_id,)
+            """
+            UPDATE tasks SET leased_by = NULL, leased_until = NULL
+            WHERE task_id = %s AND leased_by = %s
+            """,
+            (task_id, agent_id)
         )
 
 
