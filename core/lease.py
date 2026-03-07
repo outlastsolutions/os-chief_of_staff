@@ -144,10 +144,10 @@ def fail_task(conn, task_id: str, agent_id: str, reason: str) -> dict:
             """,
             (next_status, blocked_reason, task_id)
         )
+        updated = cur.fetchone()
         if next_status == "planned":
             # Clear plan so planner re-plans with failure context
             cur.execute("DELETE FROM plans WHERE task_id = %s", (task_id,))
-        updated = cur.fetchone()
 
     action = f"lease:failed→{next_status}"
     _log(conn, agent_id, "builder", action, task_id,
