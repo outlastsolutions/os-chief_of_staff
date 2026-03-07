@@ -492,6 +492,194 @@ def test_outbox_batch_resilience():
         ow.mark_outbox_failed = original_fail
 
 
+# ── 14. Dependency gating in builder claim SQL ────────────────────────────
+
+def test_dependency_gating_sql():
+    section("14 — Dependency gating: SQL gate in both claim branches")
+    import inspect
+    import re
+    import core.builder as builder_mod
+
+    src = inspect.getsource(builder_mod._claim)
+
+    check("_DEP_GATE variable defined in _claim",
+          "_DEP_GATE" in src, "")
+    check("_DEP_GATE uses jsonb_array_elements_text (JSONB dep array walk)",
+          "jsonb_array_elements_text" in src, "")
+    check("_DEP_GATE requires dependency task status = 'done'",
+          "'done'" in src, "")
+
+    # Both branches (task_id and queued) must reference _DEP_GATE in their SQL
+    usages = len(re.findall(r"\{_DEP_GATE\}", src))
+    check("_DEP_GATE interpolated into both claim SQL branches (count >= 2)",
+          usages >= 2, f"found {usages} interpolation(s)")
+
+    # Direct path: single UPDATE with WHERE; queued path: CTE candidate
+    check("Queued path uses CTE (WITH candidate AS)",
+          "WITH candidate AS" in src, "")
+    check("Direct path uses task_id WHERE clause",
+          "t.task_id = %s" in src, "")
+
+
+def test_dependency_gating_functional():
+    section("14b — Dependency gating: functional claim behavior (DB)")
+    from db.connection import transaction
+    import uuid, json
+    from core.builder import _claim
+
+    rid   = f"REQ-DEPG-{uuid.uuid4().hex[:6].upper()}"
+    p_id  = f"PLAN-DEPG-{uuid.uuid4().hex[:6].upper()}"
+    t_dep = f"TASK-DEPG-DEP-{uuid.uuid4().hex[:6].upper()}"
+    t_tgt = f"TASK-DEPG-TGT-{uuid.uuid4().hex[:6].upper()}"
+
+    try:
+        with transaction() as conn:
+            cur = conn.cursor()
+            cur.execute("""
+                INSERT INTO requests
+                    (request_id, idempotency_key, requester, source, title, description, priority, category)
+                VALUES (%s, %s, 'test', 'test', 'DepGate', 'DepGate', 'medium', 'development')
+            """, (rid, f"idem-depg-{rid}"))
+
+            # Dependency task — starts as 'done'
+            cur.execute("""
+                INSERT INTO tasks
+                    (task_id, request_id, assigned_director, title, description, status)
+                VALUES (%s, %s, 'development', 'Dep Task', 'Dep Task', 'done')
+            """, (t_dep, rid))
+
+            # Target task — depends on t_dep, starts without plan_id
+            cur.execute("""
+                INSERT INTO tasks
+                    (task_id, request_id, assigned_director, title, description,
+                     status, dependencies)
+                VALUES (%s, %s, 'development', 'Target Task', 'Target Task',
+                        'planned', %s)
+            """, (t_tgt, rid, json.dumps([t_dep])))
+
+            # Plan row (must exist before tasks.plan_id FK is set)
+            cur.execute("""
+                INSERT INTO plans (plan_id, task_id, steps)
+                VALUES (%s, %s, '[]'::jsonb)
+            """, (p_id, t_tgt))
+
+            # Wire plan_id onto the target task
+            cur.execute(
+                "UPDATE tasks SET plan_id = %s WHERE task_id = %s",
+                (p_id, t_tgt)
+            )
+
+        # Dep is 'done' → target must be claimable
+        with transaction() as conn:
+            result = _claim(conn, "test-agent", "development", t_tgt, None)
+        check("Task IS claimable when dependency is 'done'",
+              result is not None, "got None — dep gate blocked incorrectly")
+
+        # Reset target to planned, unblock lease
+        with transaction() as conn:
+            cur = conn.cursor()
+            cur.execute("""
+                UPDATE tasks SET status = 'planned', leased_by = NULL, leased_until = NULL
+                WHERE task_id = %s
+            """, (t_tgt,))
+            # Set dep to 'planned' (not done) — target must now be unclaimable
+            cur.execute(
+                "UPDATE tasks SET status = 'planned' WHERE task_id = %s", (t_dep,)
+            )
+
+        with transaction() as conn:
+            result = _claim(conn, "test-agent", "development", t_tgt, None)
+        check("Task is NOT claimable when dependency is not 'done'",
+              result is None, f"expected None, got {result}")
+
+    finally:
+        with transaction() as conn:
+            cur = conn.cursor()
+            cur.execute("DELETE FROM plans     WHERE task_id   = %s", (t_tgt,))
+            cur.execute("DELETE FROM agent_logs WHERE request_id = %s", (rid,))
+            cur.execute("DELETE FROM tasks     WHERE request_id = %s", (rid,))
+            cur.execute("DELETE FROM requests  WHERE request_id = %s", (rid,))
+
+
+# ── 15. push_workspace local_dir bounds check ─────────────────────────────
+
+def test_push_workspace_bounds_sql():
+    section("15 — push_workspace: local_dir bounds check (code inspection)")
+    import inspect
+    import core.builder as builder_mod
+
+    src_within = inspect.getsource(builder_mod._within_workspace)
+    src_github = inspect.getsource(builder_mod._tool_github_api)
+
+    check("_within_workspace uses os.path.realpath (symlink-safe)",
+          "realpath" in src_within, "")
+    check("_within_workspace uses os.sep (no prefix-match bypass)",
+          "os.sep" in src_within, "")
+
+    check("push_workspace action calls _within_workspace on local_dir",
+          "push_workspace" in src_github and "_within_workspace" in src_github, "")
+    check("Violation raises _BuilderError (typed — not silent clamp)",
+          "_BuilderError" in src_github, "")
+    check("Violation uses FailureCode.TOOL_FAILURE",
+          "TOOL_FAILURE" in src_github, "")
+
+    # Boundary check guard must appear before the GITHUB_TOKEN guard in source order.
+    # Use the specific guard expressions (not the import line) for accurate ordering.
+    within_guard_idx = src_github.index("if not _within_workspace")
+    token_guard_idx  = src_github.index("if not GITHUB_TOKEN")
+    check("Boundary check guard fires before GITHUB_TOKEN guard",
+          within_guard_idx < token_guard_idx,
+          f"_within_workspace guard@{within_guard_idx} GITHUB_TOKEN guard@{token_guard_idx}")
+
+
+def test_push_workspace_bounds_functional():
+    section("15b — push_workspace: functional reject / accept (offline)")
+    import tempfile, os, json
+    import core.builder as builder_mod
+    from core.builder import _BuilderError
+
+    with tempfile.TemporaryDirectory() as workspace:
+        # ── Negative case: local_dir escapes workspace ──────────────────────
+        bad_content = json.dumps({
+            "action":    "push_workspace",
+            "repo":      "test/repo",
+            "local_dir": "/home/osuser",
+        })
+        try:
+            builder_mod._tool_github_api(bad_content, "", workspace, task_id="TEST")
+            check("push_workspace rejects local_dir=/home/osuser", False,
+                  "no exception raised")
+        except _BuilderError as e:
+            check("push_workspace rejects local_dir=/home/osuser",
+                  "outside" in str(e).lower(),
+                  str(e)[:80])
+        except Exception as e:
+            check("push_workspace rejects local_dir=/home/osuser", False,
+                  f"wrong exception type: {type(e).__name__}: {e}")
+
+        # ── Positive case: local_dir inside workspace ───────────────────────
+        subdir = os.path.join(workspace, "output")
+        os.makedirs(subdir)
+        good_content = json.dumps({
+            "action":    "push_workspace",
+            "repo":      "test/repo",
+            "local_dir": subdir,
+        })
+        try:
+            result = builder_mod._tool_github_api(good_content, "", workspace,
+                                                  task_id="TEST")
+            # Without GITHUB_TOKEN the function returns a skip message — still accepted
+            check("push_workspace accepts local_dir inside workspace",
+                  "GITHUB_TOKEN not configured" in result or "Pushed" in result,
+                  result[:60])
+        except _BuilderError as e:
+            check("push_workspace accepts local_dir inside workspace", False,
+                  str(e)[:80])
+        except Exception as e:
+            check("push_workspace accepts local_dir inside workspace", False,
+                  f"{type(e).__name__}: {e}")
+
+
 # ── Main ──────────────────────────────────────────────────────────────────
 
 def main() -> int:
@@ -514,6 +702,10 @@ def main() -> int:
         test_conversation_context_isolation,
         test_domain_contract,
         test_outbox_batch_resilience,
+        test_dependency_gating_sql,
+        test_dependency_gating_functional,
+        test_push_workspace_bounds_sql,
+        test_push_workspace_bounds_functional,
     ]
 
     for t in tests:
