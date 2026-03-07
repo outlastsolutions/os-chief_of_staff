@@ -410,6 +410,32 @@ def test_domain_contract():
           'DOMAINS = ("development"' not in inspect.getsource(
               __import__("core.director", fromlist=["director"])), "")
 
+    # 'compute' is explicitly NOT a valid domain (resolved: not an intended domain)
+    check("'compute' is NOT in VALID_DOMAINS",
+          "compute" not in VALID_DOMAINS, f"VALID_DOMAINS={VALID_DOMAINS}")
+
+    # PM_SYSTEM must mention all domains (parallel to APM_SYSTEM coverage check)
+    pm_system = pm_mod.PM_SYSTEM
+    for domain in VALID_DOMAINS:
+        check(f"PM_SYSTEM includes domain '{domain}'",
+              domain in pm_system, "")
+
+    # director.run_domain enforces domain validation at the boundary
+    import core.director as dir_mod
+    dir_fn_src = inspect.getsource(dir_mod.run_domain)
+    check("director.run_domain rejects unknown domain (ValueError guard present)",
+          "if domain not in DOMAINS" in dir_fn_src and "raise ValueError" in dir_fn_src, "")
+
+    # director_cli iterates DOMAINS (not a hardcoded list) in run-all
+    import director_cli as dcli
+    cli_src = inspect.getsource(dcli.cmd_run_all)
+    check("director_cli cmd_run_all iterates DOMAINS (not hardcoded list)",
+          "for domain in DOMAINS" in cli_src, "")
+
+    # director_cli _USAGE derives domain list from DOMAINS at import time
+    check("director_cli _USAGE is dynamically built (not a static string)",
+          hasattr(dcli, "_USAGE") and " | ".join(DOMAINS) in dcli._USAGE, "")
+
 
 # ── 13. Outbox batch continues after mark_outbox_failed DB error ───────────
 

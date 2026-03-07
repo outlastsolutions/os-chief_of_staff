@@ -1,17 +1,24 @@
 """
 Director CLI — drive a domain's task pipeline
-Usage:
-  python director_cli.py run <domain> [request_id]     Drive tasks for a domain
-  python director_cli.py status <domain> [request_id]  Show domain task status
-  python director_cli.py report <domain> <request_id>  Generate director report
-  python director_cli.py run-all [request_id]          Drive all four domains
-
-Domains: development | operations | research | marketing
+Domains derive from config.settings.VALID_DOMAINS at runtime.
 """
 import sys
 import json
 from db.connection import transaction
 from core.director import run_domain, get_domain_status, generate_director_report, DOMAINS
+
+# Usage string built at import time from the canonical DOMAINS source so it
+# never drifts from the actual set of valid domains.
+_USAGE = (
+    "Director CLI — drive a domain's task pipeline\n"
+    "Usage:\n"
+    "  python director_cli.py run <domain> [request_id]     Drive tasks for a domain\n"
+    "  python director_cli.py status <domain> [request_id]  Show domain task status\n"
+    "  python director_cli.py report <domain> <request_id>  Generate director report\n"
+    "  python director_cli.py run-all [request_id]          Drive all domains\n"
+    "\n"
+    f"Domains: {' | '.join(DOMAINS)}\n"
+)
 
 RESET  = "\033[0m"
 BOLD   = "\033[1m"
@@ -87,7 +94,7 @@ def _print_status(status: dict):
 if __name__ == "__main__":
     args = sys.argv[1:]
     if not args:
-        print(__doc__)
+        print(_USAGE)
         sys.exit(0)
 
     cmd = args[0]
@@ -100,4 +107,4 @@ if __name__ == "__main__":
     elif cmd == "report" and len(args) >= 3:
         cmd_report(args[1], args[2])
     else:
-        print(__doc__)
+        print(_USAGE)
