@@ -19,7 +19,7 @@ import json
 import uuid
 from typing import Optional
 
-from config.settings import APM_MODEL, SLACK_TASKS_CHANNEL
+from config.settings import APM_MODEL, SLACK_TASKS_CHANNEL, VALID_DOMAINS
 from core.llm import chat_json
 from core.state_machine import Role, RequestState, transition_request
 from core.idempotency import enqueue_outbox
@@ -27,7 +27,9 @@ from core.idempotency import enqueue_outbox
 
 # ── System prompt ─────────────────────────────────────────────────────────
 
-APM_SYSTEM = """You are the Assistant Project Manager (APM) for Outlast Solutions LLC.
+_DOMAIN_STR = " | ".join(VALID_DOMAINS)
+
+APM_SYSTEM = f"""You are the Assistant Project Manager (APM) for Outlast Solutions LLC.
 Your job is to decompose a scoped work request into a minimal, executable task graph.
 
 Rules:
@@ -45,7 +47,7 @@ Rules:
 - NEVER create "clarify requirements", "gather input", or "get approval" tasks.
 - Every task needs a clear Definition of Done with testable acceptance criteria.
 - Assign complexity: low (simple script/doc/search), medium (moderate code/research), high (complex architecture).
-- Assign the correct director domain: development | operations | research | marketing
+- Assign the correct director domain: {_DOMAIN_STR}
 - List tools the executor will need: github_api | web_search | file_edit | code_run | slack_api | docs_api | shell
 - Specify dependencies only when a task genuinely cannot start until another finishes.
 - Evidence required must match the task type:
@@ -339,7 +341,7 @@ Return JSON in exactly this format:
     {{
       "title": "Short task title (unique within this request)",
       "description": "Detailed description of exactly what this task does",
-      "assigned_director": "development|operations|research|marketing",
+      "assigned_director": "{'|'.join(VALID_DOMAINS)}",
       "complexity": "low|medium|high",
       "tools_allowed": ["github_api", "web_search", "file_edit", "code_run", "slack_api", "docs_api", "shell"],
       "dependencies": ["Title of task that must complete first"],

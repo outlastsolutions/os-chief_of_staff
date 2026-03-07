@@ -20,6 +20,11 @@ BUILDER_MODEL = os.getenv("BUILDER_MODEL", "gemini-2.5-pro")
 AUDITOR_MODEL   = os.getenv("AUDITOR_MODEL",   "gemini-2.5-flash")
 DIRECTOR_MODEL  = os.getenv("DIRECTOR_MODEL",  "gemini-2.5-flash")
 
+# ── Director domains ──────────────────────────────────────────────────────
+# Single canonical source for the set of valid director domains.
+# All domain references in PM/APM prompts, Director, and CLIs derive from this.
+VALID_DOMAINS: tuple[str, ...] = ("development", "operations", "research", "marketing")
+
 # ── Director approval checkpoint ──────────────────────────────────────────
 # When enabled, the Development Director reviews every plan before Builder
 # claims the task. approve | revise | escalate.

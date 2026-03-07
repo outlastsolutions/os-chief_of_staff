@@ -126,10 +126,14 @@ def drain_once() -> tuple[int, int, int]:
             sent += 1
         except Exception as e:
             import traceback
-            with transaction() as conn:
-                mark_outbox_failed(conn, oid, error=str(e))
-            print(f"  [outbox] FAIL  #{oid} ({item['type']}): {e}")
+            dispatch_error = str(e)
             traceback.print_exc()
+            try:
+                with transaction() as conn:
+                    mark_outbox_failed(conn, oid, error=dispatch_error)
+            except Exception as db_err:
+                print(f"  [outbox] WARN  #{oid} — could not record failure in DB: {db_err}")
+            print(f"  [outbox] FAIL  #{oid} ({item['type']}): {dispatch_error}")
             failed += 1
 
     return attempted, sent, failed

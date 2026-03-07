@@ -20,7 +20,7 @@ import uuid
 import traceback
 from typing import Optional
 
-from config.settings import SLACK_TASKS_CHANNEL, DIRECTOR_MODEL, DIRECTOR_APPROVAL_ENABLED
+from config.settings import SLACK_TASKS_CHANNEL, DIRECTOR_MODEL, DIRECTOR_APPROVAL_ENABLED, VALID_DOMAINS
 from core.lease import fail_task
 from core.idempotency import enqueue_outbox
 from core.secretary_client import AGENT_IDENTITY
@@ -31,7 +31,7 @@ from core import builder as builder_agent
 from core import auditor as auditor_agent
 
 
-DOMAINS = ("development", "operations", "research", "marketing")
+DOMAINS = VALID_DOMAINS  # canonical source is config.settings.VALID_DOMAINS
 
 
 # ── Public interface ───────────────────────────────────────────────────────

@@ -373,6 +373,99 @@ def test_conversation_context_isolation():
           chat_src.index(".filter(") < chat_src.index(".limit(20)"), "")
 
 
+# ── 12. Domain contract consistency ───────────────────────────────────────
+
+def test_domain_contract():
+    section("12 — Domain contract: single canonical source, all references consistent")
+    from config.settings import VALID_DOMAINS
+    from core.director import DOMAINS
+    import core.pm as pm_mod
+    import core.apm as apm_mod
+
+    check("VALID_DOMAINS defined in config.settings",
+          len(VALID_DOMAINS) > 0, str(VALID_DOMAINS))
+    check("director.DOMAINS == VALID_DOMAINS",
+          DOMAINS == VALID_DOMAINS, f"DOMAINS={DOMAINS}")
+
+    # PM and APM must reference VALID_DOMAINS (not hardcode the list)
+    import inspect
+    pm_src = inspect.getsource(pm_mod.scope_request)
+    check("pm scope_request references VALID_DOMAINS",
+          "VALID_DOMAINS" in pm_src, "")
+
+    # APM system prompt evaluated value must include all domains
+    apm_system = apm_mod.APM_SYSTEM
+    for domain in VALID_DOMAINS:
+        check(f"APM_SYSTEM includes domain '{domain}'",
+              domain in apm_system, "")
+
+    # APM decomposition prompt source references VALID_DOMAINS
+    apm_src = inspect.getsource(apm_mod._build_decomposition_prompt)
+    check("APM _build_decomposition_prompt references VALID_DOMAINS",
+          "VALID_DOMAINS" in apm_src, "")
+
+    # No stale hardcoded domain tuple anywhere (director must import from settings)
+    dir_src = inspect.getsource(apm_mod).split("VALID_DOMAINS")[0]  # before the import
+    check("director does not hardcode domain tuple inline",
+          'DOMAINS = ("development"' not in inspect.getsource(
+              __import__("core.director", fromlist=["director"])), "")
+
+
+# ── 13. Outbox batch continues after mark_outbox_failed DB error ───────────
+
+def test_outbox_batch_resilience():
+    section("13 — Outbox batch continues if mark_outbox_failed raises")
+    import workers.outbox_worker as ow
+    import inspect
+
+    src = inspect.getsource(ow.drain_once)
+    check("mark_outbox_failed wrapped in inner try/except",
+          "except Exception as db_err" in src, "")
+    check("failed counter incremented even when mark_outbox_failed raises",
+          src.index("failed += 1") > src.index("except Exception as db_err"), "")
+    check("WARN log emitted for DB failure in error path",
+          "could not record failure" in src, "")
+
+    # Functional: verify batch continues past an item whose mark_outbox_failed raises
+    original_dispatch = ow.dispatch
+    original_fail     = ow.mark_outbox_failed
+
+    calls = {"dispatched": 0, "db_fail_called": 0, "completed": False}
+
+    def _fake_dispatch(item):
+        calls["dispatched"] += 1
+        raise RuntimeError("simulated dispatch failure")
+
+    def _fake_mark_failed(conn, oid, error=""):
+        calls["db_fail_called"] += 1
+        raise RuntimeError("simulated DB failure in mark_outbox_failed")
+
+    # Patch at module level
+    ow.dispatch           = _fake_dispatch
+    ow.mark_outbox_failed = _fake_mark_failed
+
+    from db.connection import transaction
+    with transaction() as conn:
+        from core.idempotency import enqueue_outbox
+        import uuid
+        dk1 = f"test-resil-{uuid.uuid4().hex[:8]}"
+        dk2 = f"test-resil-{uuid.uuid4().hex[:8]}"
+        enqueue_outbox(conn, dk1, "slack_post", {"channel": "C", "text": "T1"})
+        enqueue_outbox(conn, dk2, "slack_post", {"channel": "C", "text": "T2"})
+
+    try:
+        attempted, sent, failed = ow.drain_once()
+        check("drain_once completes without raising", True, "")
+        check("both items attempted", attempted >= 2, f"attempted={attempted}")
+        check("failed count > 0 despite DB error", failed > 0, f"failed={failed}")
+        check("mark_outbox_failed was attempted", calls["db_fail_called"] > 0, "")
+    except Exception as e:
+        check("drain_once completes without raising", False, str(e)[:80])
+    finally:
+        ow.dispatch           = original_dispatch
+        ow.mark_outbox_failed = original_fail
+
+
 # ── Main ──────────────────────────────────────────────────────────────────
 
 def main() -> int:
@@ -393,6 +486,8 @@ def main() -> int:
         test_worker_shutdown_terminates,
         test_db_connect_args,
         test_conversation_context_isolation,
+        test_domain_contract,
+        test_outbox_batch_resilience,
     ]
 
     for t in tests:

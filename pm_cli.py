@@ -11,6 +11,7 @@ Usage:
 import sys
 import json
 from db.connection import transaction
+from config.settings import VALID_DOMAINS
 from core.pm import (
     receive_request, scope_request, get_backlog,
     mark_done, mark_blocked, mark_cancelled,
@@ -29,7 +30,7 @@ def cmd_submit():
     requester    = input("Your name: ").strip()
     title        = input("Title: ").strip()
     description  = input("Description: ").strip()
-    category     = input("Category (development/operations/research/marketing): ").strip() or "development"
+    category     = input(f"Category ({'/'.join(VALID_DOMAINS)}): ").strip() or "development"
     business_unit = input("Business unit (xout/cyberlight/low_volt_nyc/property_with_peter/one_last/outlast): ").strip() or None
     priority     = input("Priority [medium]: ").strip() or "medium"
 

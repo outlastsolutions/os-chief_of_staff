@@ -22,7 +22,7 @@ from typing import Optional
 
 import hashlib
 
-from config.settings import PM_MODEL, SLACK_TASKS_CHANNEL
+from config.settings import PM_MODEL, SLACK_TASKS_CHANNEL, VALID_DOMAINS
 from core.llm import chat_json
 from core.state_machine import Role, RequestState, transition_request
 from core.idempotency import upsert_request, enqueue_outbox
@@ -98,8 +98,8 @@ Existing category: {req['category']}
 Return JSON with exactly these fields:
 {{
   "priority": "low|medium|high|critical",
-  "category": "development|operations|research|marketing",
-  "assigned_director": "development|operations|research|marketing",
+  "category": "{'|'.join(VALID_DOMAINS)}",
+  "assigned_director": "{'|'.join(VALID_DOMAINS)}",
   "acceptance_criteria": ["criterion 1", "criterion 2", ...],
   "systems_involved": ["system1", "system2", ...],
   "ambiguities": ["question 1 if any"],
