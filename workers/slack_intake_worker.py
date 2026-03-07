@@ -14,6 +14,7 @@ Usage:
 from __future__ import annotations
 import sys
 import time
+import signal
 import argparse
 from pathlib import Path
 
@@ -27,6 +28,14 @@ from core.slack_intake import ingest
 
 
 DEFAULT_POLL_INTERVAL = 60  # seconds
+
+_shutdown = False
+
+
+def _handle_signal(signum, frame):
+    global _shutdown
+    _shutdown = True
+    print(f"[slack_intake_worker] signal {signum} received — finishing current cycle then exiting")
 
 
 def poll_once(lookback_hours: int = 24) -> int:
@@ -48,9 +57,12 @@ def run(poll_interval: int = DEFAULT_POLL_INTERVAL,
         print(f"[slack_intake_worker] ingested {n} new request(s).")
         return
 
+    signal.signal(signal.SIGTERM, _handle_signal)
+    signal.signal(signal.SIGINT, _handle_signal)
+
     print(f"[slack_intake_worker] starting — polling every {poll_interval}s "
           f"(lookback {lookback_hours}h)")
-    while True:
+    while not _shutdown:
         try:
             n = poll_once(lookback_hours=lookback_hours)
             if n:
@@ -58,7 +70,9 @@ def run(poll_interval: int = DEFAULT_POLL_INTERVAL,
         except Exception as e:
             print(f"  [slack_intake] poll error: {e}")
             traceback.print_exc()
-        time.sleep(poll_interval)
+        if not _shutdown:
+            time.sleep(poll_interval)
+    print("[slack_intake_worker] shutdown complete")
 
 
 if __name__ == "__main__":

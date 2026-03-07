@@ -20,6 +20,7 @@ from __future__ import annotations
 import sys
 import time
 import json
+import signal
 import urllib.request
 import argparse
 from pathlib import Path
@@ -39,6 +40,14 @@ from core.secretary_client import post_slack, send_email as sec_send_email
 
 DEFAULT_POLL_INTERVAL = 5  # seconds
 BATCH_SIZE = 20
+
+_shutdown = False
+
+
+def _handle_signal(signum, frame):
+    global _shutdown
+    _shutdown = True
+    print(f"[outbox_worker] signal {signum} received — finishing current cycle then exiting")
 
 
 # ── Dispatcher ────────────────────────────────────────────────────────────
@@ -135,8 +144,11 @@ def run(poll_interval: int = DEFAULT_POLL_INTERVAL, once: bool = False) -> None:
         print(f"[outbox_worker] drained — attempted={attempted} sent={sent} failed={failed}")
         return
 
+    signal.signal(signal.SIGTERM, _handle_signal)
+    signal.signal(signal.SIGINT, _handle_signal)
+
     print(f"[outbox_worker] starting — polling every {poll_interval}s")
-    while True:
+    while not _shutdown:
         try:
             attempted, sent, failed = drain_once()
             if attempted:
@@ -145,7 +157,9 @@ def run(poll_interval: int = DEFAULT_POLL_INTERVAL, once: bool = False) -> None:
             import traceback
             print(f"  [outbox] poll error: {e}")
             traceback.print_exc()
-        time.sleep(poll_interval)
+        if not _shutdown:
+            time.sleep(poll_interval)
+    print("[outbox_worker] shutdown complete")
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────

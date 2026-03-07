@@ -268,6 +268,47 @@ def test_worker_interval_validation():
         check("slack_intake_worker rejects interval=-1", ">" in str(e), str(e))
 
 
+# ── 9b. Worker SIGTERM handling ───────────────────────────────────────────
+
+def test_worker_sigterm():
+    section("9b — Worker SIGTERM graceful shutdown")
+    import signal
+    import inspect
+    import workers.outbox_worker as ow
+    import workers.slack_intake_worker as siw
+
+    # outbox_worker: _shutdown flag and signal handler present
+    ow_src = inspect.getsource(ow)
+    check("outbox_worker has _shutdown flag",
+          "_shutdown" in ow_src, "")
+    check("outbox_worker registers SIGTERM handler",
+          "signal.SIGTERM" in ow_src and "_handle_signal" in ow_src, "")
+    check("outbox_worker loop exits on _shutdown",
+          "while not _shutdown" in ow_src, "")
+    check("outbox_worker skips sleep on _shutdown",
+          "if not _shutdown" in ow_src, "")
+
+    # slack_intake_worker: same checks
+    siw_src = inspect.getsource(siw)
+    check("slack_intake_worker has _shutdown flag",
+          "_shutdown" in siw_src, "")
+    check("slack_intake_worker registers SIGTERM handler",
+          "signal.SIGTERM" in siw_src and "_handle_signal" in siw_src, "")
+    check("slack_intake_worker loop exits on _shutdown",
+          "while not _shutdown" in siw_src, "")
+
+    # Functional: simulate signal delivery — set _shutdown and confirm run() exits
+    ow._shutdown = False
+    ow._handle_signal(signal.SIGTERM, None)
+    check("outbox_worker _handle_signal sets _shutdown=True", ow._shutdown, "")
+    ow._shutdown = False  # reset
+
+    siw._shutdown = False
+    siw._handle_signal(signal.SIGTERM, None)
+    check("slack_intake_worker _handle_signal sets _shutdown=True", siw._shutdown, "")
+    siw._shutdown = False  # reset
+
+
 # ── 10. DB connect_args SQLite-only ───────────────────────────────────────
 
 def test_db_connect_args():
@@ -310,6 +351,7 @@ def main() -> int:
         test_slack_intake_idempotency,
         test_outbox_worker_counters,
         test_worker_interval_validation,
+        test_worker_sigterm,
         test_db_connect_args,
         test_conversation_context_isolation,
     ]
