@@ -52,6 +52,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- received | scoped | planned | executing | verifying | done | blocked | cancelled
     status              TEXT NOT NULL DEFAULT 'planned',
     blocked_reason      TEXT,
+    failure_code        TEXT,               -- TOOL_FAILURE | TEST_FAILURE | BUDGET_EXCEEDED | LEASE_LOST | LOCK_CONTENTION | PLAN_MISSING | INTERNAL_ERROR
     -- Leasing (concurrency control)
     leased_by           TEXT,               -- agent identifier
     leased_until        TIMESTAMPTZ,

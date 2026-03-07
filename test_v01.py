@@ -56,7 +56,10 @@ def test_cleanup():
     """Delete tasks/requests left behind by previous test runs."""
     with transaction() as conn:
         with conn.cursor() as cur:
+            # Break tasks↔plans circular FK before deleting either
+            cur.execute("UPDATE tasks SET plan_id = NULL WHERE task_id LIKE 'TASK-%'")
             # Delete child rows first (no CASCADE on these FKs)
+            cur.execute("DELETE FROM plans WHERE task_id LIKE 'TASK-%'")
             cur.execute("DELETE FROM agent_logs WHERE task_id LIKE 'TASK-%'")
             cur.execute("DELETE FROM artifacts WHERE task_id LIKE 'TASK-%'")
             cur.execute("DELETE FROM execution_reports WHERE task_id LIKE 'TASK-%'")

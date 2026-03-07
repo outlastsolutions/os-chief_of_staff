@@ -17,6 +17,17 @@ LEASE_MINUTES = 10
 MAX_ATTEMPTS  = 3   # task goes BLOCKED after this many failures
 
 
+class FailureCode:
+    """Typed failure taxonomy — stored in tasks.failure_code."""
+    TOOL_FAILURE      = "TOOL_FAILURE"       # a tool call raised an exception
+    TEST_FAILURE      = "TEST_FAILURE"       # code/tests ran but returned non-zero
+    BUDGET_EXCEEDED   = "BUDGET_EXCEEDED"    # tool call budget exhausted
+    LEASE_LOST        = "LEASE_LOST"         # heartbeat failed — lease taken by another agent
+    LOCK_CONTENTION   = "LOCK_CONTENTION"    # resource lock held by another agent
+    PLAN_MISSING      = "PLAN_MISSING"       # task had no plan when builder claimed it
+    INTERNAL_ERROR    = "INTERNAL_ERROR"     # unexpected exception
+
+
 def claim_task(conn, agent_id: str, director: Optional[str] = None,
                complexity: Optional[str] = None) -> Optional[dict]:
     """
@@ -113,10 +124,12 @@ def release_to_verifying(conn, task_id: str, agent_id: str) -> bool:
     return ok
 
 
-def fail_task(conn, task_id: str, agent_id: str, reason: str) -> dict:
+def fail_task(conn, task_id: str, agent_id: str, reason: str,
+              failure_code: Optional[str] = None) -> dict:
     """
     Builder failed. Increment attempt counter.
     If attempt >= MAX_ATTEMPTS, block the task. Otherwise return to planned for retry.
+    failure_code should be one of FailureCode.* constants.
     Returns updated task row.
     """
     with conn.cursor() as cur:
@@ -136,13 +149,14 @@ def fail_task(conn, task_id: str, agent_id: str, reason: str) -> dict:
                 leased_by       = NULL,
                 leased_until    = NULL,
                 blocked_reason  = %s,
+                failure_code    = %s,
                 plan_id         = NULL,
                 tool_calls_used = 0,
                 updated_at      = NOW()
             WHERE task_id = %s
             RETURNING *
             """,
-            (next_status, blocked_reason, task_id)
+            (next_status, blocked_reason, failure_code, task_id)
         )
         updated = cur.fetchone()
         if next_status == "planned":
@@ -151,7 +165,7 @@ def fail_task(conn, task_id: str, agent_id: str, reason: str) -> dict:
 
     action = f"lease:failed→{next_status}"
     _log(conn, agent_id, "builder", action, task_id,
-         {"reason": reason, "attempt": row["attempt"]})
+         {"reason": reason, "failure_code": failure_code, "attempt": row["attempt"]})
     return dict(updated)
 
 

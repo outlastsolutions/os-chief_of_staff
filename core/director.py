@@ -22,6 +22,8 @@ from typing import Optional
 
 from config.settings import SLACK_TASKS_CHANNEL
 from core.lease import fail_task
+from core.idempotency import enqueue_outbox
+from core.secretary_client import AGENT_IDENTITY
 from core import planner as planner_agent
 from core import builder as builder_agent
 from core import auditor as auditor_agent
@@ -238,11 +240,8 @@ def _notify_blocked(conn, domain: str, blocked: list[dict]) -> None:
         f":warning: *[Director: {domain}] Blocked tasks*\n"
         f"{len(blocked)} task(s) need attention:\n{lines}"
     )
-    try:
-        from core.secretary_client import notify
-        notify(SLACK_TASKS_CHANNEL, text, agent="apm")
-    except Exception as e:
-        print(f"  [director:{domain}] Slack notify skipped: {e}")
+    dedupe_key = f"director:blocked:{domain}:" + ":".join(t["task_id"] for t in blocked)
+    _enqueue_slack(conn, dedupe_key, text, agent="apm")
 
 
 def _notify_report(conn, domain: str, request_id: str,
@@ -254,8 +253,18 @@ def _notify_report(conn, domain: str, request_id: str,
         f"{status['done']}/{status['total']} tasks done"
         + (f" | {status['blocked']} blocked" if status["blocked"] else "")
     )
+    _enqueue_slack(conn, f"director:report:{request_id}:{overall}", text, agent="apm")
+
+
+def _enqueue_slack(conn, dedupe_key: str, text: str, agent: str = "apm") -> None:
+    """Queue a Slack post via the outbox so it survives Secretary downtime."""
+    identity = AGENT_IDENTITY.get(agent, {"username": agent.title(), "icon_emoji": ":robot_face:"})
     try:
-        from core.secretary_client import notify
-        notify(SLACK_TASKS_CHANNEL, text, agent="apm")
+        enqueue_outbox(conn, dedupe_key, "slack_post", {
+            "channel":    SLACK_TASKS_CHANNEL,
+            "text":       text,
+            "username":   identity["username"],
+            "icon_emoji": identity["icon_emoji"],
+        })
     except Exception as e:
-        print(f"  [director:{domain}] Slack notify skipped: {e}")
+        print(f"  [director:{agent}] outbox enqueue failed: {e}")

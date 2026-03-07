@@ -20,10 +20,13 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
+import hashlib
+
 from config.settings import PM_MODEL, SLACK_TASKS_CHANNEL
 from core.llm import chat_json
 from core.state_machine import Role, RequestState, transition_request
 from core.idempotency import upsert_request, enqueue_outbox
+from core.secretary_client import AGENT_IDENTITY
 
 
 # ── System prompt ────────────────────────────────────────────────────────
@@ -232,11 +235,7 @@ def _notify_slack(conn, request_id: str, title: str, scoping: dict) -> None:
         f"*Acceptance criteria:*\n{criteria}"
         f"{ambi_text}"
     )
-    try:
-        from core.secretary_client import notify
-        notify(SLACK_TASKS_CHANNEL, text, agent="pm")
-    except Exception as e:
-        print(f"  [pm] Slack notify skipped (Secretary unavailable): {e}")
+    _enqueue_slack(conn, f"pm:scoped:{request_id}", text, agent="pm")
 
 
 def _notify_slack_status(conn, request_id: str, title: str,
@@ -247,11 +246,18 @@ def _notify_slack_status(conn, request_id: str, title: str,
         f"*{title}*"
         + (f"\n{detail}" if detail else "")
     )
-    try:
-        from core.secretary_client import notify
-        notify(SLACK_TASKS_CHANNEL, text, agent="pm")
-    except Exception as e:
-        print(f"  [pm] Slack notify skipped (Secretary unavailable): {e}")
+    _enqueue_slack(conn, f"pm:{status}:{request_id}", text, agent="pm")
+
+
+def _enqueue_slack(conn, dedupe_key: str, text: str, agent: str = "pm") -> None:
+    """Queue a Slack post via the outbox so it survives Secretary downtime."""
+    identity = AGENT_IDENTITY.get(agent, {"username": agent.title(), "icon_emoji": ":robot_face:"})
+    enqueue_outbox(conn, dedupe_key, "slack_post", {
+        "channel":    SLACK_TASKS_CHANNEL,
+        "text":       text,
+        "username":   identity["username"],
+        "icon_emoji": identity["icon_emoji"],
+    })
 
 
 def _log(conn, role: str, action: str, request_id: Optional[str] = None,

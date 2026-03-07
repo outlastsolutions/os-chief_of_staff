@@ -30,6 +30,8 @@ from core.llm import chat_json
 from core.lease import (
     claim_task, heartbeat, release_to_verifying,
     fail_task, increment_tool_calls,
+    acquire_resource_lock, release_resource_lock,
+    FailureCode,
 )
 
 
@@ -56,6 +58,15 @@ Respond with valid JSON only:
 {"tool": "...", "resource": "path or query or n/a", "content": "exact content to execute", "reason": "one line why"}"""
 
 
+# ── Typed builder exception ───────────────────────────────────────────────
+
+class _BuilderError(Exception):
+    """Raised inside execute_task with a typed FailureCode for clean routing."""
+    def __init__(self, message: str, code: str):
+        super().__init__(message)
+        self.code = code
+
+
 # ── Public interface ──────────────────────────────────────────────────────
 
 def execute_task(conn, agent_id: str,
@@ -79,7 +90,7 @@ def execute_task(conn, agent_id: str,
     try:
         plan, dod = _load_plan_and_dod(conn, tid)
         if not plan:
-            raise ValueError("Task has no plan. Run planner first.")
+            raise _BuilderError("Task has no plan. Run planner first.", FailureCode.PLAN_MISSING)
 
         artifacts, logs = _execute_steps(conn, tid, agent_id, task, plan, dod, workspace)
 
@@ -88,10 +99,17 @@ def execute_task(conn, agent_id: str,
         print(f"  [builder:{agent_id}] {tid} → verifying ({len(artifacts)} artifacts)")
         return report
 
+    except _BuilderError as e:
+        tb = traceback.format_exc()
+        print(f"  [builder:{agent_id}] {tid} failed [{e.code}]: {e}")
+        fail_task(conn, tid, agent_id, str(e), failure_code=e.code)
+        _create_report(conn, tid, agent_id, "failed", [], [tb])
+        return None
+
     except Exception as e:
         tb = traceback.format_exc()
-        print(f"  [builder:{agent_id}] {tid} failed: {e}")
-        fail_task(conn, tid, agent_id, str(e))
+        print(f"  [builder:{agent_id}] {tid} failed [INTERNAL_ERROR]: {e}")
+        fail_task(conn, tid, agent_id, str(e), failure_code=FailureCode.INTERNAL_ERROR)
         _create_report(conn, tid, agent_id, "failed", [], [tb])
         return None
 
@@ -229,6 +247,13 @@ def _execute_steps(conn, task_id: str, agent_id: str,
         tool_hint = step.get("tool", "none")
         order     = step.get("order", "?")
 
+        # ── Heartbeat: extend lease before every step ──────────────────────
+        if not heartbeat(conn, task_id, agent_id):
+            raise _BuilderError(
+                f"Lease lost before step {order} — another agent took over.",
+                FailureCode.LEASE_LOST
+            )
+
         # Build per-step prompt with previous results as context
         prev_context = ""
         if step_results:
@@ -262,15 +287,24 @@ def _execute_steps(conn, task_id: str, agent_id: str,
         content  = action.get("content") or ""
         log_entry = f"Step {order}: [{tool}] {step['title']}"
 
-        # Budget check
+        # ── Budget check ───────────────────────────────────────────────────
         if tool != "none":
             within_budget = increment_tool_calls(conn, task_id)
             if not within_budget:
-                raise RuntimeError(
-                    f"Tool budget exceeded at step {order}. Task blocked."
+                raise _BuilderError(
+                    f"Tool budget exceeded at step {order}.",
+                    FailureCode.BUDGET_EXCEEDED
                 )
 
         print(f"    {log_entry}")
+
+        # ── Resource lock ──────────────────────────────────────────────────
+        lock_key = _compute_lock_key(tool, resource, content, task_id)
+        if lock_key and not acquire_resource_lock(conn, lock_key, agent_id):
+            raise _BuilderError(
+                f"Resource '{lock_key}' locked by another agent at step {order}.",
+                FailureCode.LOCK_CONTENTION
+            )
 
         try:
             if tool == "file_edit":
@@ -293,7 +327,8 @@ def _execute_steps(conn, task_id: str, agent_id: str,
                                    "snippet": exec_result[:500]})
 
             elif tool == "github_api":
-                exec_result = _tool_github_api(content, resource, workspace)
+                exec_result = _tool_github_api(content, resource, workspace,
+                                               task_id=task_id)
                 artifacts.append({"type": "github", "resource": resource,
                                    "output": exec_result[:500]})
 
@@ -312,15 +347,66 @@ def _execute_steps(conn, task_id: str, agent_id: str,
             })
             logs.append(f"✓ {log_entry} → {str(exec_result)[:120]}")
 
-        except Exception as e:
+        except _BuilderError:
+            # Already typed — propagate as-is
             step_results.append({
                 "order": order, "tool": tool,
-                "status": "error", "summary": str(e)[:150]
+                "status": "error", "summary": "lease/lock/budget failure"
             })
-            logs.append(f"✗ {log_entry} → ERROR: {e}")
+            logs.append(f"✗ {log_entry} → INTERNAL FAILURE")
             raise
 
+        except RuntimeError as e:
+            # code_run / shell exit non-zero → TEST_FAILURE
+            msg = str(e)
+            step_results.append({
+                "order": order, "tool": tool,
+                "status": "error", "summary": msg[:150]
+            })
+            logs.append(f"✗ {log_entry} → ERROR: {msg[:120]}")
+            raise _BuilderError(msg, FailureCode.TEST_FAILURE)
+
+        except Exception as e:
+            msg = str(e)
+            step_results.append({
+                "order": order, "tool": tool,
+                "status": "error", "summary": msg[:150]
+            })
+            logs.append(f"✗ {log_entry} → ERROR: {msg[:120]}")
+            raise _BuilderError(msg, FailureCode.TOOL_FAILURE)
+
+        finally:
+            if lock_key:
+                release_resource_lock(conn, lock_key, agent_id)
+
     return artifacts, logs
+
+
+# ── Resource lock key helper ──────────────────────────────────────────────
+
+def _compute_lock_key(tool: str, resource: str, content: str,
+                      task_id: str) -> Optional[str]:
+    """
+    Return a lock key for the resource being modified, or None if no lock needed.
+    file_edit: workspace-scoped per task (prevents concurrent writes to same path).
+    github_api writes: locks the repo+branch being modified.
+    """
+    if tool == "file_edit":
+        safe_resource = resource.replace("/", "_").replace("..", "")
+        return f"workspace:{task_id}:{safe_resource}"
+
+    if tool == "github_api":
+        try:
+            params = json.loads(content) if content else {}
+            action = params.get("action", "")
+            if action in ("create_file", "update_file", "push_workspace", "create_pr"):
+                repo   = params.get("repo", resource or "unknown")
+                branch = params.get("branch", f"task/{task_id}")
+                return f"github:{repo}:{branch}"
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+    return None
 
 
 # ── Tool handlers ─────────────────────────────────────────────────────────
@@ -406,7 +492,8 @@ def _tool_web_search(query: str) -> str:
     return text[:800]
 
 
-def _tool_github_api(content: str, resource: str, workspace: str) -> str:
+def _tool_github_api(content: str, resource: str, workspace: str,
+                     task_id: str = "unknown") -> str:
     """
     Interact with GitHub REST API.
     `content` must be a JSON string with:
@@ -437,7 +524,7 @@ def _tool_github_api(content: str, resource: str, workspace: str) -> str:
     if repo and "/" not in repo:
         repo = f"{GITHUB_ORG}/{repo}"
 
-    branch  = params.get("branch", "main")
+    branch  = params.get("branch") or f"task/{task_id}"
     headers = {
         "Authorization": f"Bearer {GITHUB_TOKEN}",
         "Accept": "application/vnd.github+json",
