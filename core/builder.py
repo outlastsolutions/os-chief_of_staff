@@ -572,15 +572,25 @@ def _tool_github_api(content: str, resource: str, workspace: str,
 
     from config.settings import GITHUB_TOKEN, GITHUB_ORG
 
-    if not GITHUB_TOKEN:
-        return "[github_api] GITHUB_TOKEN not configured — skipped"
-
     try:
         params = json.loads(content) if content else {}
     except json.JSONDecodeError:
         params = {"action": "create_file", "content": content, "path": resource}
 
     action  = params.get("action", "create_file")
+
+    # Boundary check for push_workspace fires before any API call or token check,
+    # so the security gate is enforced even when GITHUB_TOKEN is not configured.
+    if action == "push_workspace":
+        early_local_dir = params.get("local_dir") or workspace
+        if not _within_workspace(early_local_dir, workspace):
+            raise _BuilderError(
+                f"push_workspace: local_dir '{early_local_dir}' resolves outside task workspace — aborted.",
+                FailureCode.TOOL_FAILURE,
+            )
+
+    if not GITHUB_TOKEN:
+        return "[github_api] GITHUB_TOKEN not configured — skipped"
     repo    = params.get("repo", resource or "")
     if repo and "/" not in repo:
         repo = f"{GITHUB_ORG}/{repo}"
@@ -637,14 +647,8 @@ def _tool_github_api(content: str, resource: str, workspace: str,
         return f"{verb} {repo}/{path} on {branch}"
 
     elif action == "push_workspace":
-        # Push all files from a local directory (or the task workspace) to a repo branch.
-        # local_dir is LLM-controlled; reject paths that resolve outside workspace.
+        # local_dir already validated above (before GITHUB_TOKEN check).
         local_dir = params.get("local_dir") or workspace
-        if not _within_workspace(local_dir, workspace):
-            raise _BuilderError(
-                f"push_workspace: local_dir '{local_dir}' resolves outside task workspace — aborted.",
-                FailureCode.TOOL_FAILURE,
-            )
         message   = params.get("message", "feat: builder output via CoS")
         pushed    = []
         errors    = []

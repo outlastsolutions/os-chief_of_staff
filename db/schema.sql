@@ -237,3 +237,39 @@ CREATE TABLE IF NOT EXISTS artifacts (
 );
 
 CREATE INDEX IF NOT EXISTS artifacts_task_id_idx ON artifacts (task_id);
+
+
+-- ─────────────────────────────────────────────
+-- DEPENDENCY ORDER ENFORCEMENT TRIGGER
+-- DB-level safety net: any caller path that tries
+-- to transition a task to 'executing' is blocked
+-- if any declared dependency is not yet 'done'.
+-- This backs up the claim SQL gate; the trigger
+-- fires even on direct SQL updates outside builder.
+-- ─────────────────────────────────────────────
+CREATE OR REPLACE FUNCTION enforce_task_dep_order()
+RETURNS TRIGGER AS $$
+BEGIN
+    -- Only check on transitions into 'executing' from a non-executing state.
+    IF NEW.status = 'executing' AND OLD.status IS DISTINCT FROM 'executing' THEN
+        IF EXISTS (
+            SELECT 1
+            FROM jsonb_array_elements_text(COALESCE(NEW.dependencies, '[]'::jsonb)) AS dep
+            WHERE NOT EXISTS (
+                SELECT 1 FROM tasks d WHERE d.task_id = dep AND d.status = 'done'
+            )
+        ) THEN
+            RAISE EXCEPTION
+                'dependency_order_violation: task % cannot execute — one or more dependencies are not done',
+                NEW.task_id;
+        END IF;
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_enforce_task_dep_order ON tasks;
+CREATE TRIGGER trg_enforce_task_dep_order
+    BEFORE UPDATE ON tasks
+    FOR EACH ROW
+    EXECUTE FUNCTION enforce_task_dep_order();
