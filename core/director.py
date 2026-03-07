@@ -20,10 +20,12 @@ import uuid
 import traceback
 from typing import Optional
 
-from config.settings import SLACK_TASKS_CHANNEL
+from config.settings import SLACK_TASKS_CHANNEL, DIRECTOR_MODEL, DIRECTOR_APPROVAL_ENABLED
 from core.lease import fail_task
 from core.idempotency import enqueue_outbox
 from core.secretary_client import AGENT_IDENTITY
+from core.llm import chat_json
+from core import escalation as esc
 from core import planner as planner_agent
 from core import builder as builder_agent
 from core import auditor as auditor_agent
@@ -55,10 +57,34 @@ def run_domain(conn, domain: str, request_id: Optional[str] = None,
                 planner_agent.plan_task(conn, task["task_id"])
                 results["planned"] += 1
                 print(f"  [director:{domain}] planned {task['task_id']} — {task['title']}")
+            except ValueError as e:
+                msg = str(e)
+                if "escalated" in msg.lower():
+                    print(f"  [director:{domain}] escalated {task['task_id']}: {msg}")
+                    results["blocked"] += 1
+                else:
+                    print(f"  [director:{domain}] plan failed {task['task_id']}: {msg}")
+                    results["failed"] += 1
+                continue
             except Exception as e:
                 print(f"  [director:{domain}] plan failed {task['task_id']}: {e}")
                 results["failed"] += 1
                 continue
+
+            # 1.5. Director approval checkpoint (optional, gated by config)
+            if DIRECTOR_APPROVAL_ENABLED:
+                verdict, feedback = _review_plan(conn, task["task_id"], domain)
+                if verdict == "escalate":
+                    esc.escalate_task(conn, task["task_id"], feedback,
+                                      agent_id=f"director:{domain}")
+                    results["blocked"] += 1
+                    continue
+                elif verdict == "revise":
+                    _request_plan_revision(conn, task["task_id"], feedback)
+                    results["planned"] -= 1  # un-count; will re-plan next iteration
+                    print(f"  [director:{domain}] plan revision requested: {feedback[:60]}")
+                    continue
+                # "approve" falls through to build
 
         # 2. Build the next planned task (must have a plan attached)
         report = builder_agent.execute_task(
@@ -254,6 +280,84 @@ def _notify_report(conn, domain: str, request_id: str,
         + (f" | {status['blocked']} blocked" if status["blocked"] else "")
     )
     _enqueue_slack(conn, f"director:report:{request_id}:{overall}", text, agent="apm")
+
+
+def _review_plan(conn, task_id: str, domain: str) -> tuple[str, str]:
+    """
+    Director LLM reviews a newly created plan.
+    Returns (verdict, feedback): verdict is 'approve' | 'revise' | 'escalate'.
+    Only called when DIRECTOR_APPROVAL_ENABLED is True.
+    """
+    with conn.cursor() as cur:
+        cur.execute("SELECT * FROM tasks WHERE task_id = %s", (task_id,))
+        task = cur.fetchone()
+        cur.execute("SELECT * FROM plans WHERE task_id = %s", (task_id,))
+        plan = cur.fetchone()
+
+    if not task or not plan:
+        return "approve", ""
+
+    steps = plan["steps"]
+    if isinstance(steps, str):
+        try:
+            steps = json.loads(steps)
+        except Exception:
+            steps = []
+
+    step_summary = "\n".join(
+        f"  {s.get('order', '?')}. [{s.get('tool', '?')}] {s.get('title', '?')}: "
+        f"{s.get('description', '')[:100]}"
+        for s in steps
+    )
+
+    prompt = (
+        f"You are the {domain.title()} Director at Outlast Solutions LLC.\n"
+        f"Review this implementation plan and return a verdict.\n\n"
+        f"Task: {task['title']}\n"
+        f"Description: {task['description']}\n"
+        f"Complexity: {task['complexity']}\n\n"
+        f"Plan steps:\n{step_summary}\n\n"
+        f"Test strategy: {plan.get('test_strategy', 'not specified')}\n"
+        f"Notes: {plan.get('notes', 'none')}\n\n"
+        f"Return JSON:\n"
+        f'{{"verdict": "approve|revise|escalate", "feedback": "one sentence reason if not approve"}}'
+    )
+
+    try:
+        result = chat_json(
+            model=DIRECTOR_MODEL,
+            system=(
+                f"You are the {domain.title()} Director. Review plans concisely. "
+                f"Approve unless the plan is clearly wrong, unsafe, or incomplete."
+            ),
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=256,
+        )
+        verdict  = result.get("verdict", "approve")
+        feedback = result.get("feedback", "")
+        if verdict not in ("approve", "revise", "escalate"):
+            verdict = "approve"
+        print(f"  [director:{domain}] plan review → {verdict}: {feedback[:60]}")
+        return verdict, feedback
+    except Exception as e:
+        print(f"  [director:{domain}] plan review failed, defaulting to approve: {e}")
+        return "approve", ""
+
+
+def _request_plan_revision(conn, task_id: str, feedback: str) -> None:
+    """Clear the plan and store Director feedback so Planner can re-plan."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE tasks
+            SET plan_id        = NULL,
+                blocked_reason = %s,
+                updated_at     = NOW()
+            WHERE task_id = %s
+            """,
+            (f"[Director revision requested] {feedback[:400]}", task_id)
+        )
+        cur.execute("DELETE FROM plans WHERE task_id = %s", (task_id,))
 
 
 def _enqueue_slack(conn, dedupe_key: str, text: str, agent: str = "apm") -> None:

@@ -13,6 +13,7 @@ Usage:
 import sys
 import json
 import time
+import hashlib
 from db.connection import transaction
 from core.pm  import receive_request, scope_request
 from core.apm import decompose_request, get_request_status, get_next_ready_tasks
@@ -27,10 +28,14 @@ CYAN   = "\033[96m"
 DIM    = "\033[2m"
 
 
+_E2E_TITLE = "Write a Python utility module for string sanitisation"
+_E2E_IDEM_KEY = "e2e-" + hashlib.sha256(_E2E_TITLE.encode()).hexdigest()[:16]
+
 TEST_REQUEST = {
-    "requester":     "e2e-test",
-    "source":        "cli",
-    "title":         "Write a Python utility module for string sanitisation",
+    "requester":        "e2e-test",
+    "source":           "cli",
+    "idempotency_key":  _E2E_IDEM_KEY,   # fixed key → fully idempotent re-runs
+    "title":            _E2E_TITLE,
     "description":   (
         "Create a Python module `utils/sanitise.py` with functions to: "
         "(1) strip HTML tags from a string, "
@@ -78,31 +83,60 @@ def run(title: str = None, description: str = None) -> None:
     print(f"  Request: {BOLD}{req_data['title']}{RESET}")
     t0 = time.time()
 
-    # ── Step 1: PM — receive ──────────────────────────────────────────────
+    # ── Step 1: PM — receive (idempotent) ─────────────────────────────────
     step("PM — receive_request")
     with transaction() as conn:
         req = receive_request(conn, req_data)
     request_id = req["request_id"]
-    ok(f"Created {BOLD}{request_id}{RESET}  status={req['status']}")
+    current_status = req["status"]
+    is_resume = current_status not in ("received",)
+    if is_resume:
+        print(f"  {YELLOW}↩ Resuming{RESET} {BOLD}{request_id}{RESET}  status={current_status}")
+    else:
+        ok(f"Created {BOLD}{request_id}{RESET}  status={current_status}")
 
-    # ── Step 2: PM — scope (LLM) ──────────────────────────────────────────
+    # ── Step 2: PM — scope (skip if already done) ─────────────────────────
     step("PM — scope_request  (LLM)")
-    with transaction() as conn:
-        scoped = scope_request(conn, request_id)
-    ok(f"Scoped → priority={scoped['priority']}  category={scoped['category']}  status={scoped['status']}")
+    if current_status in ("received",):
+        with transaction() as conn:
+            scoped = scope_request(conn, request_id)
+        current_status = scoped["status"]
+        ok(f"Scoped → priority={scoped['priority']}  category={scoped['category']}")
+    else:
+        with transaction() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT * FROM requests WHERE request_id = %s", (request_id,))
+                scoped = dict(cur.fetchone())
+        print(f"  {DIM}skipped (already {current_status}){RESET}")
 
-    # ── Step 3: APM — decompose (LLM) ─────────────────────────────────────
+    # ── Step 3: APM — decompose (skip if already done) ────────────────────
     step("APM — decompose_request  (LLM)")
-    with transaction() as conn:
-        tasks = decompose_request(conn, request_id)
+    if current_status in ("scoped",):
+        with transaction() as conn:
+            tasks = decompose_request(conn, request_id)
+        current_status = "in_progress"
+    else:
+        # Fetch existing tasks — no re-decomposition
+        with transaction() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT * FROM tasks WHERE request_id = %s ORDER BY created_at",
+                    (request_id,)
+                )
+                tasks = [dict(r) for r in cur.fetchall()]
+        print(f"  {DIM}skipped — {len(tasks)} existing task(s) loaded{RESET}")
 
     if not tasks:
-        err("No tasks created — check APM logs.")
+        err("No tasks found — check APM logs.")
         sys.exit(1)
 
-    ok(f"{len(tasks)} task(s) created:")
+    ok(f"{len(tasks)} task(s) in pipeline:")
     for t in tasks:
-        print(f"    {DIM}{t['task_id']}{RESET}  [{t.get('complexity','?')}]  {t['title'][:55]}")
+        icon = (f"{GREEN}✓{RESET}" if t["status"] == "done" else
+                f"{RED}✗{RESET}" if t["status"] == "blocked" else
+                f"{YELLOW}~{RESET}")
+        print(f"    {icon} {DIM}{t['task_id']}{RESET}  [{t.get('complexity','?')}]"
+              f"  {t['status']:<10}  {t['title'][:48]}")
 
     # ── Step 4: Director — run each domain ────────────────────────────────
     step("Director — run_domain pipeline  (plan → build → verify)")

@@ -24,6 +24,7 @@ from typing import Optional
 
 from config.settings import PLANNER_MODEL
 from core.llm import chat_json
+from core import escalation as esc
 
 
 PLANNER_SYSTEM = """You are the Planner Agent for Outlast Solutions LLC.
@@ -60,6 +61,12 @@ def plan_task(conn, task_id: str) -> dict:
         raise ValueError(
             f"Task must be 'planned' to create a plan. Current: {task['status']}"
         )
+
+    # ── Escalation checks (pre-plan) ──────────────────────────────────────
+    violation = esc.run_planner_checks(task, dod)
+    if violation:
+        esc.escalate_task(conn, task_id, violation, agent_id="planner")
+        raise ValueError(f"Task {task_id} escalated before planning: {violation}")
 
     # Check if plan already exists
     with conn.cursor() as cur:

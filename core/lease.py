@@ -25,7 +25,8 @@ class FailureCode:
     LEASE_LOST        = "LEASE_LOST"         # heartbeat failed — lease taken by another agent
     LOCK_CONTENTION   = "LOCK_CONTENTION"    # resource lock held by another agent
     PLAN_MISSING      = "PLAN_MISSING"       # task had no plan when builder claimed it
-    INTERNAL_ERROR    = "INTERNAL_ERROR"     # unexpected exception
+    INTERNAL_ERROR            = "INTERNAL_ERROR"             # unexpected exception
+    HUMAN_DECISION_REQUIRED   = "HUMAN_DECISION_REQUIRED"    # escalation gate fired
 
 
 def claim_task(conn, agent_id: str, director: Optional[str] = None,

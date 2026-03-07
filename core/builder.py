@@ -33,6 +33,21 @@ from core.lease import (
     acquire_resource_lock, release_resource_lock,
     FailureCode,
 )
+from core import escalation as esc
+
+
+# ── Subprocess sandbox ─────────────────────────────────────────────────────
+# Sensitive env vars are stripped before any code_run or shell step so that
+# Builder-executed code cannot exfiltrate credentials even if compromised.
+_SUBPROCESS_ENV_ALLOWLIST = {
+    "PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "TERM",
+    "SHELL", "TMPDIR", "TMP", "TEMP", "PWD",
+}
+
+def _safe_env() -> dict:
+    """Return a clean environment for Builder subprocesses."""
+    return {k: v for k, v in os.environ.items()
+            if k in _SUBPROCESS_ENV_ALLOWLIST}
 
 
 BUILDER_SYSTEM = """You are the Builder Agent for Outlast Solutions LLC.
@@ -91,6 +106,13 @@ def execute_task(conn, agent_id: str,
         plan, dod = _load_plan_and_dod(conn, tid)
         if not plan:
             raise _BuilderError("Task has no plan. Run planner first.", FailureCode.PLAN_MISSING)
+
+        # ── Escalation checks (pre-execution) ─────────────────────────────
+        violation = esc.run_builder_checks(task, plan, dod)
+        if violation:
+            esc.escalate_task(conn, tid, violation, agent_id=agent_id)
+            _create_report(conn, tid, agent_id, "failed", [], [f"Escalated: {violation}"])
+            return None
 
         artifacts, logs = _execute_steps(conn, tid, agent_id, task, plan, dod, workspace)
 
@@ -450,6 +472,7 @@ def _tool_code_run(code: str, timeout: int = 15, workspace: str = None) -> str:
         ["python3", "-c", code],
         capture_output=True, text=True, timeout=timeout,
         cwd=workspace,
+        env=_safe_env(),
     )
     output = (result.stdout + result.stderr).strip()
     if result.returncode != 0:
@@ -466,6 +489,7 @@ def _tool_shell(command: str, timeout: int = 30, workspace: str = None) -> str:
     result = subprocess.run(
         command, shell=True, capture_output=True, text=True, timeout=timeout,
         cwd=workspace,
+        env=_safe_env(),
     )
     output = (result.stdout + result.stderr).strip()
     if result.returncode != 0:
