@@ -127,7 +127,7 @@ def check_sensitive_content(text: str) -> Optional[str]:
 def check_repeated_failure(task: dict) -> Optional[str]:
     code = task.get("failure_code")
     attempt = task.get("attempt", 0)
-    if (attempt >= 2
+    if (attempt >= 3
             and code
             and code != FailureCode.HUMAN_DECISION_REQUIRED):
         return (

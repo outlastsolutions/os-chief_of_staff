@@ -52,7 +52,6 @@ def _recover_stale_leases(conn) -> int:
             SET status          = 'planned',
                 leased_by       = NULL,
                 leased_until    = NULL,
-                plan_id         = NULL,
                 tool_calls_used = 0,
                 updated_at      = NOW()
             WHERE status IN ('executing', 'verifying')

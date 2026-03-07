@@ -111,4 +111,9 @@ def _gemini(model: str, system: str, messages: list[dict],
             temperature=temperature,
         ),
     )
+    if response.text is None:
+        raise RuntimeError(
+            "Gemini returned an empty response (safety filter or quota). "
+            f"Finish reason: {getattr(response, 'prompt_feedback', 'unknown')}"
+        )
     return response.text

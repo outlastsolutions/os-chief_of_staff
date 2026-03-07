@@ -40,12 +40,15 @@ def _key(title: str) -> str:
 
 REQUESTS = [
     {
-        "title": "Write an email address validator function",
+        "title": "Write a temperature converter utility",
         "description": (
-            "Create a Python module `utils/email_validator.py` with a function "
-            "`is_valid_email(address: str) -> bool` that checks for a valid email format "
-            "using regex. Include a docstring. Write unit tests in `tests/test_email_validator.py` "
-            "that cover valid emails, missing @, missing domain, and empty string. All tests must pass."
+            "Create a Python module `utils/temperature.py` with three functions: "
+            "`celsius_to_fahrenheit(c: float) -> float`, "
+            "`fahrenheit_to_celsius(f: float) -> float`, "
+            "`celsius_to_kelvin(c: float) -> float`. "
+            "Each uses the standard formula and includes a docstring. "
+            "Write unit tests in `tests/test_temperature.py` with at least 2 assertions per function "
+            "(e.g. 0C=32F, 100C=212F, 0C=273.15K). Use `assertAlmostEqual`. All tests must pass."
         ),
         "category": "development",
         "business_unit": "one_last",
@@ -62,26 +65,27 @@ REQUESTS = [
         "business_unit": "one_last",
     },
     {
-        "title": "Write a string slugify utility",
+        "title": "Write a number formatting utility",
         "description": (
-            "Create a Python module `utils/slugify.py` with a function "
-            "`slugify(text: str) -> str` that converts a string to a URL-safe slug: "
-            "lowercase, spaces to hyphens, special characters removed. "
-            "Write unit tests in `tests/test_slugify.py` with at least 4 test cases "
-            "including unicode chars and multiple spaces. All tests must pass."
+            "Create a Python module `utils/numformat.py` with two functions: "
+            "`format_currency(amount: float, symbol: str = '$') -> str` that returns "
+            "e.g. '$1,234.56', and `format_percentage(value: float, decimals: int = 1) -> str` "
+            "that returns e.g. '42.5%'. Include docstrings. "
+            "Write unit tests in `tests/test_numformat.py` covering positive amounts, zero, "
+            "large numbers with commas, and percentage formatting. All tests must pass."
         ),
         "category": "development",
         "business_unit": "one_last",
     },
     {
-        "title": "Create a pagination utility for lists",
+        "title": "Implement a simple queue data structure",
         "description": (
-            "Create a Python module `utils/paginate.py` with a function "
-            "`paginate(items: list, page: int, page_size: int) -> dict` that returns "
-            "`{'items': [...], 'page': int, 'total_pages': int, 'total_items': int}`. "
-            "Handle out-of-range pages gracefully (return empty items). "
-            "Write unit tests in `tests/test_paginate.py` covering normal pagination, "
-            "last page, and out-of-range. All tests must pass."
+            "Create a Python module `utils/queue_ds.py` with a `Queue` class that supports "
+            "`enqueue(item)`, `dequeue() -> item` (raises IndexError if empty), "
+            "`peek() -> item` (raises IndexError if empty), `is_empty() -> bool`, and `size() -> int`. "
+            "Use a list internally. Include docstrings on the class and all methods. "
+            "Write unit tests in `tests/test_queue_ds.py` covering enqueue, dequeue, "
+            "dequeue on empty (assert raises IndexError), peek, and size. All tests must pass."
         ),
         "category": "development",
         "business_unit": "cyberlight",

@@ -60,8 +60,8 @@ Produce the exact content to execute for the current step only.
 Rules:
 - Be precise and literal. Your output is executed directly.
 - file_edit: provide the full file content to write (no markdown fences).
-- code_run: provide executable Python code only (no shell commands, no markdown).
-- shell: provide the exact shell command string.
+- code_run: provide executable Python code only (no shell commands, no markdown). Do NOT use code_run to run test files — use shell with "python3 -m pytest <path>" instead.
+- shell: provide the exact shell command string. Use this for running tests: "python3 -m pytest tests/ -v" or "python3 -m pytest path/to/test_file.py -v".
 - web_search: provide the exact search query string.
 - github_api: provide a JSON string: {"action":"create_file|update_file|push_workspace|create_pr","repo":"owner/repo","path":"file/path","content":"...","message":"commit msg","branch":"main"}. For push_workspace, omit path/content — all files in the task workspace are pushed automatically.
 - docs_api: provide {"title": "...", "content": "..."}.
@@ -454,7 +454,8 @@ def _tool_file_edit(path: str, content: str, workspace: str) -> str:
 
 def _tool_code_run(code: str, timeout: int = 15, workspace: str = None) -> str:
     """Run Python code in a subprocess. Captures stdout+stderr.
-    If content looks like a shell invocation rather than Python code, runs as shell."""
+    If content looks like a shell invocation rather than Python code, runs as shell.
+    Code is written to a temp file so __file__ is a real path (avoids import issues)."""
     code = code.strip()
     # Detect shell-style invocation (e.g. "python3 health_check.py" or "python script.py")
     first_token = code.split()[0] if code else ""
@@ -468,12 +469,27 @@ def _tool_code_run(code: str, timeout: int = 15, workspace: str = None) -> str:
     if looks_like_shell:
         return _tool_shell(code, timeout, workspace=workspace)
 
-    result = subprocess.run(
-        ["python3", "-c", code],
-        capture_output=True, text=True, timeout=timeout,
-        cwd=workspace,
-        env=_safe_env(),
-    )
+    # Write to a temp file so __file__ is a real path — avoids sys.path/__file__ issues
+    # when LLM-generated test runners use os.path.dirname(__file__) for imports.
+    import tempfile
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".py", dir=workspace or None,
+        delete=False, prefix="_cos_run_"
+    ) as f:
+        f.write(code)
+        tmp_path = f.name
+    try:
+        result = subprocess.run(
+            ["python3", tmp_path],
+            capture_output=True, text=True, timeout=timeout,
+            cwd=workspace,
+            env=_safe_env(),
+        )
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
     output = (result.stdout + result.stderr).strip()
     if result.returncode != 0:
         raise RuntimeError(f"code_run exited {result.returncode}: {output[:300]}")
