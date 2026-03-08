@@ -319,8 +319,8 @@ def _execute_steps(conn, task_id: str, agent_id: str,
 
         step_prompt = (
             f"Execute step {order} of {len(steps)}:{prev_context}\n\n"
-            f"Step {order}: [{tool_hint}] {step['title']}\n"
-            f"Description: {step['description']}\n"
+            f"Step {order}: [{tool_hint}] {step.get('title', '')}\n"
+            f"Description: {step.get('description', '')}\n"
             f"Resource: {step.get('resource', 'n/a')}\n"
             f"Expected output: {step.get('expected_output', '')}\n"
             f"Risk: {step.get('risk', 'low')}"
@@ -340,7 +340,7 @@ def _execute_steps(conn, task_id: str, agent_id: str,
         tool     = action.get("tool", tool_hint) or "none"
         resource = action.get("resource", step.get("resource", "n/a")) or "n/a"
         content  = action.get("content") or ""
-        log_entry = f"Step {order}: [{tool}] {step['title']}"
+        log_entry = f"Step {order}: [{tool}] {step.get('title', '')}"
 
         # ── Budget check ───────────────────────────────────────────────────
         if tool != "none":

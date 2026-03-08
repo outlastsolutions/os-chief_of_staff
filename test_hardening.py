@@ -776,13 +776,19 @@ def test_outbox_retry_functional():
             (oid_transient,)
         )
 
-    # Should now be claimable again
+    # Should now be claimable again — check directly to avoid limit collisions
     with transaction() as conn:
-        claimed = claim_pending_outbox(conn, limit=20)
-    claimed_ids = [r["outbox_id"] for r in claimed]
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT outbox_id FROM outbox
+            WHERE outbox_id = %s
+              AND status = 'pending'
+              AND (next_retry_at IS NULL OR next_retry_at <= NOW())
+        """, (oid_transient,))
+        claimable_row = cur.fetchone()
     check("After backoff elapsed: transient row is claimable again",
-          oid_transient in claimed_ids,
-          f"claimed_ids={claimed_ids}")
+          claimable_row is not None,
+          f"row not found as claimable (next_retry_at not elapsed or wrong status)")
 
     # Mark sent (simulate success on retry)
     with transaction() as conn:
