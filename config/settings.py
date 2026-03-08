@@ -38,6 +38,18 @@ DOMAIN_REGISTRY: dict = {
     "marketing":   {"status": "enabled",  "reason": ""},
 }
 
+# ── Director domain cycle execution budgets ───────────────────────────────
+# Per-domain cycle limits enforced by run_domain().
+# max_tasks:     max task iterations per cycle (None = use run_domain caller default)
+# max_runtime_s: max wall-clock seconds per cycle (None = no runtime limit)
+# DOMAIN_REGISTRY overrides max_tasks when both are set; None means no override.
+DOMAIN_BUDGETS: dict = {
+    "development": {"max_tasks": None, "max_runtime_s": None},
+    "operations":  {"max_tasks": None, "max_runtime_s": None},
+    "research":    {"max_tasks": None, "max_runtime_s": None},
+    "marketing":   {"max_tasks": None, "max_runtime_s": None},
+}
+
 # ── Director approval checkpoint ──────────────────────────────────────────
 # When enabled, the Development Director reviews every plan before Builder
 # claims the task. approve | revise | escalate.

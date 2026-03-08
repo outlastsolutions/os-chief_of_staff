@@ -25,7 +25,7 @@ from typing import Optional
 
 from config.settings import (SLACK_TASKS_CHANNEL, DIRECTOR_MODEL,
                              DIRECTOR_APPROVAL_ENABLED, VALID_DOMAINS,
-                             DOMAIN_REGISTRY)
+                             DOMAIN_REGISTRY, DOMAIN_BUDGETS)
 from core.lease import fail_task
 from core.idempotency import enqueue_outbox
 from core.secretary_client import AGENT_IDENTITY
@@ -72,11 +72,23 @@ def run_domain(conn, domain: str, request_id: Optional[str] = None,
         _emit_policy_audit(domain, gating_status, gating_reason, gated["run_ts"])
         return gated
 
+    # Resolve effective cycle budget (registry overrides caller default when set)
+    _budget      = DOMAIN_BUDGETS.get(domain, {})
+    eff_tasks    = _budget.get("max_tasks") or max_tasks
+    eff_runtime  = _budget.get("max_runtime_s")  # None = no limit
+
     results = {"domain": domain, "planned": 0, "built": 0, "verified": 0,
                "failed": 0, "blocked": 0, "skipped": 0, "typed_failures": {},
-               "gating_status": "ENABLED", "gating_reason": ""}
+               "gating_status": "ENABLED", "gating_reason": "",
+               "budget_hit": False,
+               "budget_limit": {"max_tasks": eff_tasks, "max_runtime_s": eff_runtime}}
 
-    for _ in range(max_tasks):
+    for _ in range(eff_tasks):
+        # Runtime budget check at each iteration boundary
+        if eff_runtime is not None and (time.time() - t0) > eff_runtime:
+            results["budget_hit"] = True
+            print(f"  [director:{domain}] runtime budget hit ({eff_runtime}s)")
+            break
         # 1. Plan the next unplanned task
         task = _next_unplanned(conn, domain, request_id)
         if task:
@@ -139,6 +151,13 @@ def run_domain(conn, domain: str, request_id: Optional[str] = None,
                 results["verified"] += 1
             else:
                 results["failed"] += 1
+
+    else:
+        # Loop ran all eff_tasks iterations without an early break.
+        # If work still remains, the task budget was the limiting factor.
+        if _count_active(conn, domain, request_id) > 0:
+            results["budget_hit"] = True
+            print(f"  [director:{domain}] task budget hit ({eff_tasks} iterations)")
 
     # Surface any blocked tasks
     blocked = _get_blocked(conn, domain, request_id)

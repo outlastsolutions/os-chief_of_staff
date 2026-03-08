@@ -928,6 +928,75 @@ def test_stage3_readiness_check():
 
 # ── 19. Director run telemetry ─────────────────────────────────────────────
 
+def test_director_execution_budgets():
+    section("23 — Director execution budgets: policy + enforcement (code inspection)")
+    import inspect
+    import core.director as director_mod
+    from config import settings as settings_mod
+
+    # Registry in settings
+    check("DOMAIN_BUDGETS defined in config.settings",
+          hasattr(settings_mod, "DOMAIN_BUDGETS"), "")
+    budgets = getattr(settings_mod, "DOMAIN_BUDGETS", {})
+    from config.settings import VALID_DOMAINS
+    missing = [d for d in VALID_DOMAINS if d not in budgets]
+    check("DOMAIN_BUDGETS covers all VALID_DOMAINS",
+          not missing, f"missing: {missing}")
+    check("All current domains default to None budgets (backward-compatible)",
+          all(b.get("max_tasks") is None and b.get("max_runtime_s") is None
+              for b in budgets.values()),
+          f"non-None budgets: {[(k,v) for k,v in budgets.items() if v.get('max_tasks') or v.get('max_runtime_s')]}")
+
+    src_run = inspect.getsource(director_mod.run_domain)
+    check("run_domain resolves effective budget from DOMAIN_BUDGETS",
+          "DOMAIN_BUDGETS" in src_run or "eff_tasks" in src_run, "")
+    check("run_domain enforces max_runtime_s with budget_hit flag",
+          "max_runtime_s" in src_run and "budget_hit" in src_run, "")
+    check("budget_hit and budget_limit present in results dict",
+          '"budget_hit"' in src_run and '"budget_limit"' in src_run, "")
+    check("Task budget exhaustion detected via for-else pattern",
+          "else:" in src_run and "budget_hit" in src_run, "")
+
+    # ── 23b — functional: budget enforcement ──────────────────────────────
+    section("23b — Director execution budgets: functional enforcement")
+    from unittest.mock import patch
+
+    # Default budget → budget fields present; budget_hit=False when no work remains
+    try:
+        from db.connection import transaction
+        # Use a nonexistent request_id so no stale tasks pollute the result
+        with transaction() as conn:
+            result = director_mod.run_domain(conn, "development",
+                                             request_id="REQ-BUDGET-TEST-NONE",
+                                             max_tasks=1)
+        check("Default budget: budget_hit=False when no work in scoped request",
+              result.get("budget_hit") is False,
+              f"budget_hit={result.get('budget_hit')!r}")
+        check("Default budget: budget_limit has max_tasks and max_runtime_s keys",
+              "max_tasks" in result.get("budget_limit", {})
+              and "max_runtime_s" in result.get("budget_limit", {}),
+              f"budget_limit={result.get('budget_limit')!r}")
+    except Exception as e:
+        check("23b DB test skipped", False,
+              f"{type(e).__name__}: {str(e)[:80]}")
+
+    # Zero runtime budget → immediate budget_hit
+    with patch.dict(director_mod.DOMAIN_BUDGETS,
+                    {"operations": {"max_tasks": 10, "max_runtime_s": 0}}):
+        with transaction() as conn:
+            result2 = director_mod.run_domain(conn, "operations",
+                                              request_id=None, max_tasks=10)
+    check("Zero runtime budget: budget_hit=True",
+          result2.get("budget_hit") is True,
+          f"budget_hit={result2.get('budget_hit')!r}")
+    check("Zero runtime budget: budget_limit reflects configured values",
+          result2.get("budget_limit", {}).get("max_runtime_s") == 0,
+          f"budget_limit={result2.get('budget_limit')!r}")
+    check("Zero runtime budget: all task counters still at zero (no work done)",
+          all(result2.get(k) == 0 for k in ("planned", "built", "verified")),
+          f"counters={result2}")
+
+
 def test_policy_observability():
     section("22 — Policy observability: audit trail + reason contract (code inspection)")
     import inspect
@@ -1220,6 +1289,7 @@ def main() -> int:
         test_director_cycle_contract,
         test_director_rollout_gating,
         test_policy_observability,
+        test_director_execution_budgets,
     ]
 
     for t in tests:
