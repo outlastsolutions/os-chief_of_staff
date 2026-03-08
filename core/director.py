@@ -50,7 +50,7 @@ def run_domain(conn, domain: str, request_id: Optional[str] = None,
 
     t0 = time.time()
     results = {"domain": domain, "planned": 0, "built": 0, "verified": 0,
-               "failed": 0, "blocked": 0, "skipped": 0}
+               "failed": 0, "blocked": 0, "skipped": 0, "typed_failures": {}}
 
     for _ in range(max_tasks):
         # 1. Plan the next unplanned task
@@ -121,6 +121,9 @@ def run_domain(conn, domain: str, request_id: Optional[str] = None,
     results["blocked"] = len(blocked)
     if blocked:
         _notify_blocked(conn, domain, blocked)
+
+    # Collect typed failure codes for tasks that failed during this cycle
+    results["typed_failures"] = _collect_typed_failures(conn, domain, request_id, t0)
 
     # Structured telemetry — one JSON line per director cycle
     results["elapsed_s"] = round(time.time() - t0, 2)
@@ -209,6 +212,58 @@ def generate_director_report(conn, domain: str, request_id: str) -> dict:
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────
+
+def _collect_typed_failures(conn, domain: str, request_id: Optional[str],
+                            since_epoch: float) -> dict:
+    """
+    Count tasks by failure_code that were updated during this cycle window.
+    Returns e.g. {"TOOL_FAILURE": 2, "INTERNAL_ERROR": 1}.
+    Surfaces build failures that the builder returns None for (silent drop paths).
+    """
+    since_ts = datetime.fromtimestamp(since_epoch, tz=timezone.utc)
+    filters  = ["assigned_director = %s", "failure_code IS NOT NULL", "updated_at >= %s"]
+    params: list = [domain, since_ts]
+    if request_id:
+        filters.append("request_id = %s")
+        params.append(request_id)
+    with conn.cursor() as cur:
+        cur.execute(
+            f"SELECT failure_code, COUNT(*) AS n FROM tasks "
+            f"WHERE {' AND '.join(filters)} GROUP BY failure_code",
+            params,
+        )
+        return {r["failure_code"]: r["n"] for r in cur.fetchall()}
+
+
+def _validate_report_consistency(report_row: dict, domain_status: dict) -> list[str]:
+    """
+    Compare a persisted director_report row against the live domain status for
+    the same domain/request. Returns a list of inconsistency descriptions;
+    empty list means consistent.
+    """
+    issues = []
+    if report_row["tasks_completed"] != domain_status["done"]:
+        issues.append(
+            f"tasks_completed mismatch: report={report_row['tasks_completed']} "
+            f"db_done={domain_status['done']}"
+        )
+    expected_remaining = (
+        domain_status.get("planned", 0)
+        + domain_status.get("executing", 0)
+        + domain_status.get("verifying", 0)
+    )
+    if report_row["tasks_remaining"] != expected_remaining:
+        issues.append(
+            f"tasks_remaining mismatch: report={report_row['tasks_remaining']} "
+            f"db_remaining={expected_remaining}"
+        )
+    if report_row["tasks_failed"] != domain_status["blocked"]:
+        issues.append(
+            f"tasks_failed mismatch: report={report_row['tasks_failed']} "
+            f"db_blocked={domain_status['blocked']}"
+        )
+    return issues
+
 
 def _next_unplanned(conn, domain: str,
                     request_id: Optional[str]) -> Optional[dict]:

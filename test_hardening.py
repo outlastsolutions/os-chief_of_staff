@@ -928,6 +928,62 @@ def test_stage3_readiness_check():
 
 # ── 19. Director run telemetry ─────────────────────────────────────────────
 
+def test_director_cycle_contract():
+    section("20 — Director cycle contract: typed failures + report consistency (code inspection)")
+    import inspect
+    import core.director as director_mod
+
+    src_run    = inspect.getsource(director_mod.run_domain)
+    src_ctf    = inspect.getsource(director_mod._collect_typed_failures)
+    src_vrc    = inspect.getsource(director_mod._validate_report_consistency)
+
+    check("run_domain initialises typed_failures in results dict",
+          '"typed_failures"' in src_run or "'typed_failures'" in src_run, "")
+    check("run_domain calls _collect_typed_failures to populate typed_failures",
+          "_collect_typed_failures" in src_run, "")
+    check("_collect_typed_failures defined and queries failure_code IS NOT NULL",
+          "failure_code IS NOT NULL" in src_ctf, "")
+    check("_collect_typed_failures filters by since_epoch (updated_at >= ...)",
+          "updated_at" in src_ctf and "since_epoch" in src_ctf, "")
+    check("_validate_report_consistency checks tasks_completed vs domain done",
+          "tasks_completed" in src_vrc and "done" in src_vrc, "")
+    check("_validate_report_consistency checks tasks_remaining vs domain remaining",
+          "tasks_remaining" in src_vrc and "expected_remaining" in src_vrc, "")
+
+    # ── 20b — pure-function unit tests for _validate_report_consistency ────
+    section("20b — Director report consistency: pure-function contract checks")
+
+    matching_report = {"tasks_completed": 3, "tasks_failed": 0, "tasks_remaining": 0}
+    matching_status = {"done": 3, "blocked": 0, "planned": 0, "executing": 0, "verifying": 0}
+    issues = director_mod._validate_report_consistency(matching_report, matching_status)
+    check("_validate_report_consistency returns [] for matching report/status",
+          issues == [], f"unexpected issues: {issues}")
+
+    mismatched_report = {"tasks_completed": 2, "tasks_failed": 1, "tasks_remaining": 1}
+    mismatched_status = {"done": 3, "blocked": 0, "planned": 0, "executing": 0, "verifying": 0}
+    issues2 = director_mod._validate_report_consistency(mismatched_report, mismatched_status)
+    check("_validate_report_consistency returns issues for mismatched tasks_completed",
+          any("tasks_completed" in i for i in issues2),
+          f"issues={issues2}")
+
+    # ── 20c — DB functional: run_domain returns typed_failures dict ────────
+    section("20c — Director cycle contract: DB functional")
+    try:
+        from db.connection import transaction
+        with transaction() as conn:
+            result = director_mod.run_domain(conn, "operations",
+                                             request_id=None, max_tasks=1)
+        check("run_domain returns typed_failures key of type dict",
+              isinstance(result.get("typed_failures"), dict),
+              f"typed_failures={result.get('typed_failures')!r}")
+        check("typed_failures values are integers when non-empty",
+              all(isinstance(v, int) for v in result["typed_failures"].values()),
+              f"typed_failures={result['typed_failures']}")
+    except Exception as e:
+        check("20c DB test skipped", False,
+              f"{type(e).__name__}: {str(e)[:120]}")
+
+
 def test_director_telemetry():
     section("19 — Director run telemetry: payload shape (code inspection + DB)")
     import inspect
@@ -1000,6 +1056,7 @@ def main() -> int:
         test_proof_run_harness,
         test_stage3_readiness_check,
         test_director_telemetry,
+        test_director_cycle_contract,
     ]
 
     for t in tests:
