@@ -259,6 +259,45 @@ def generate_director_report(conn, domain: str, request_id: str) -> dict:
     return dict(row)
 
 
+# ── Escalation delivery reliability ────────────────────────────────────────
+
+def classify_escalation_delivery(outbox_row: dict) -> str:
+    """
+    Classify the delivery state of a budget-escalation outbox row.
+    Uses existing outbox status field — no new schema required.
+      terminal  — status='dead'; dispatch exhausted all retries, no further attempts
+      delivered — status='sent'; successfully dispatched
+      transient — any other state (pending/sending); retryable
+    """
+    status = outbox_row.get("status", "")
+    if status == "dead":
+        return "terminal"
+    if status == "sent":
+        return "delivered"
+    return "transient"
+
+
+def get_dead_budget_escalations(conn) -> list[dict]:
+    """
+    Return all budget-escalation outbox rows that reached terminal/dead state.
+    Provides the dead-letter visibility path for operator triage.
+    Fields returned: outbox_id, dedupe_key, status, attempts, last_error,
+                     next_retry_at, created_at.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT outbox_id, dedupe_key, type, status, attempts,
+                   last_error, next_retry_at, created_at
+            FROM outbox
+            WHERE dedupe_key LIKE 'director:budget_escalation:%'
+              AND status = 'dead'
+            ORDER BY created_at DESC
+            """
+        )
+        return [dict(r) for r in cur.fetchall()]
+
+
 # ── Helpers ────────────────────────────────────────────────────────────────
 
 def _check_domain_gating(domain: str) -> tuple[bool, str, str]:

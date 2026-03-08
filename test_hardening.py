@@ -1352,6 +1352,91 @@ def test_budget_escalation():
               f"{type(e).__name__}: {str(e)[:120]}")
 
 
+def test_escalation_delivery_reliability():
+    section("25 — Escalation delivery reliability: classification + dead-letter (code inspection)")
+    import inspect
+    import core.director as director_mod
+
+    check("classify_escalation_delivery function defined",
+          hasattr(director_mod, "classify_escalation_delivery"), "")
+    check("get_dead_budget_escalations function defined",
+          hasattr(director_mod, "get_dead_budget_escalations"), "")
+
+    src_cls  = inspect.getsource(director_mod.classify_escalation_delivery)
+    src_dead = inspect.getsource(director_mod.get_dead_budget_escalations)
+
+    check("classify_escalation_delivery returns 'terminal' for dead status",
+          "terminal" in src_cls and "dead" in src_cls, "")
+    check("classify_escalation_delivery returns 'transient' for retryable states",
+          "transient" in src_cls, "")
+    check("classify_escalation_delivery returns 'delivered' for sent status",
+          "delivered" in src_cls and "sent" in src_cls, "")
+    check("get_dead_budget_escalations filters by budget_escalation dedupe prefix",
+          "budget_escalation" in src_dead, "")
+    check("get_dead_budget_escalations filters by status='dead'",
+          "dead" in src_dead, "")
+
+    # ── 25b — functional: transient / terminal / dead-letter query ─────────
+    section("25b — Escalation delivery reliability: functional")
+    try:
+        from db.connection import transaction
+        from core.idempotency import enqueue_outbox, mark_outbox_failed, OUTBOX_MAX_ATTEMPTS
+
+        test_run   = uuid.uuid4().hex[:8]
+        dedupe_key = f"director:budget_escalation:test_domain:TEST-{test_run}"
+
+        # Insert a test escalation outbox row
+        with transaction() as conn:
+            outbox_id = enqueue_outbox(conn, dedupe_key, "slack_post",
+                                       {"channel": "C0AJL6RCYKU", "text": "test escalation"})
+        check("Test escalation row inserted into outbox",
+              outbox_id is not None, f"outbox_id={outbox_id}")
+
+        # One failure → still pending (transient — retryable)
+        with transaction() as conn:
+            mark_outbox_failed(conn, outbox_id, "connection refused")
+        with transaction() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT * FROM outbox WHERE outbox_id = %s", (outbox_id,))
+            row = dict(cur.fetchone())
+        check("After 1 failure: status is pending (transient — retryable)",
+              row["status"] == "pending", f"status={row['status']}")
+        check("classify_escalation_delivery returns 'transient' for pending row",
+              director_mod.classify_escalation_delivery(row) == "transient",
+              f"got {director_mod.classify_escalation_delivery(row)!r}")
+
+        # Exhaust remaining attempts → dead (terminal)
+        with transaction() as conn:
+            for _ in range(OUTBOX_MAX_ATTEMPTS - 1):  # already failed once above
+                mark_outbox_failed(conn, outbox_id, "terminal error")
+        with transaction() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT * FROM outbox WHERE outbox_id = %s", (outbox_id,))
+            dead_row = dict(cur.fetchone())
+        check("After max failures: status is dead (terminal)",
+              dead_row["status"] == "dead", f"status={dead_row['status']}")
+        check("classify_escalation_delivery returns 'terminal' for dead row",
+              director_mod.classify_escalation_delivery(dead_row) == "terminal",
+              f"got {director_mod.classify_escalation_delivery(dead_row)!r}")
+
+        # Dead-letter query returns the row with required triage fields
+        with transaction() as conn:
+            dead_rows = director_mod.get_dead_budget_escalations(conn)
+        dead_keys = [r["dedupe_key"] for r in dead_rows]
+        check("get_dead_budget_escalations returns the dead escalation row",
+              dedupe_key in dead_keys,
+              f"looking for {dedupe_key!r} in first 3: {dead_keys[:3]}")
+        matching = next((r for r in dead_rows if r["dedupe_key"] == dedupe_key), None)
+        required_fields = {"outbox_id", "dedupe_key", "status", "attempts", "last_error"}
+        missing = required_fields - set((matching or {}).keys())
+        check("Dead-letter row includes all required operator triage fields",
+              not missing, f"missing: {missing}")
+
+    except Exception as e:
+        check("25b DB test skipped", False,
+              f"{type(e).__name__}: {str(e)[:120]}")
+
+
 # ── Main ──────────────────────────────────────────────────────────────────
 
 def main() -> int:
@@ -1388,6 +1473,7 @@ def main() -> int:
         test_policy_observability,
         test_director_execution_budgets,
         test_budget_escalation,
+        test_escalation_delivery_reliability,
     ]
 
     for t in tests:
