@@ -51,6 +51,11 @@ def run_domain(conn, domain: str, request_id: Optional[str] = None,
     Drive up to max_tasks tasks for a given domain through the full pipeline.
     Optionally scoped to a single request_id.
     Returns a summary dict.
+
+    Isolation contract: when request_id is provided, every SQL query in this
+    cycle (plan, build, verify, count, blocked, typed-failures) filters by
+    that request_id. Tasks from other requests in the same domain are never
+    claimed, planned, built, or counted in cycle outputs.
     """
     if domain not in DOMAINS:
         raise ValueError(f"Unknown domain '{domain}'. Must be one of: {DOMAINS}")

@@ -1629,6 +1629,124 @@ def test_typed_response_policy():
               f"{type(e).__name__}: {str(e)[:120]}")
 
 
+def test_request_scope_isolation():
+    section("28 — Request-scope isolation: SQL filter contract (code inspection)")
+    import inspect
+    import core.director as director_mod
+    import core.builder  as builder_mod
+    import core.auditor  as auditor_mod
+
+    # Each helper must use "request_id = %s" as a SQL filter when request_id is provided
+    src_unplanned = inspect.getsource(director_mod._next_unplanned)
+    check("_next_unplanned filters by request_id = %s",
+          '"request_id = %s"' in src_unplanned or "'request_id = %s'" in src_unplanned, "")
+
+    src_active = inspect.getsource(director_mod._count_active)
+    check("_count_active filters by request_id = %s",
+          '"request_id = %s"' in src_active or "'request_id = %s'" in src_active, "")
+
+    src_blocked = inspect.getsource(director_mod._get_blocked)
+    check("_get_blocked filters by request_id = %s",
+          '"request_id = %s"' in src_blocked or "'request_id = %s'" in src_blocked, "")
+
+    src_ctf = inspect.getsource(director_mod._collect_typed_failures)
+    check("_collect_typed_failures filters by request_id = %s",
+          '"request_id = %s"' in src_ctf or "'request_id = %s'" in src_ctf, "")
+
+    src_claim = inspect.getsource(builder_mod._claim)
+    check("builder._claim filters by request_id = %s",
+          "request_id = %s" in src_claim, "")
+
+    src_verifying = inspect.getsource(auditor_mod._claim_verifying)
+    check("auditor._claim_verifying filters by request_id = %s",
+          "request_id = %s" in src_verifying, "")
+
+    # run_domain docstring documents isolation contract
+    src_run = inspect.getsource(director_mod.run_domain)
+    check("run_domain docstring documents isolation contract",
+          "Isolation contract" in src_run or "isolation" in src_run.lower(), "")
+
+    # ── 28b — functional: cross-request isolation ──────────────────────────
+    section("28b — Request-scope isolation: functional (two requests, same domain)")
+    try:
+        from db.connection import transaction
+
+        req_a = f"REQ-ISO-A-{uuid.uuid4().hex[:6].upper()}"
+        req_b = f"REQ-ISO-B-{uuid.uuid4().hex[:6].upper()}"
+        tid_a = f"TASK-ISO-A-{uuid.uuid4().hex[:6].upper()}"
+        tid_b = f"TASK-ISO-B-{uuid.uuid4().hex[:6].upper()}"
+
+        try:
+            # Insert two requests + one task each in the same domain
+            with transaction() as conn:
+                cur = conn.cursor()
+                for rid in (req_a, req_b):
+                    cur.execute(
+                        """INSERT INTO requests
+                           (request_id, idempotency_key, requester, source,
+                            title, description, priority, category)
+                           VALUES (%s, %s, 'test', 'test',
+                                   'Scope ISO Test', 'Scope ISO Test', 'low', 'development')""",
+                        (rid, f"idem-iso-{rid}")
+                    )
+                cur.execute(
+                    """INSERT INTO tasks
+                       (task_id, request_id, assigned_director, title,
+                        description, status)
+                       VALUES (%s, %s, 'development', 'ISO Task A', 'ISO A', 'planned')""",
+                    (tid_a, req_a)
+                )
+                cur.execute(
+                    """INSERT INTO tasks
+                       (task_id, request_id, assigned_director, title,
+                        description, status)
+                       VALUES (%s, %s, 'development', 'ISO Task B', 'ISO B', 'planned')""",
+                    (tid_b, req_b)
+                )
+
+            # _next_unplanned scoped to req_a must return only task_a
+            with transaction() as conn:
+                result_a = director_mod._next_unplanned(conn, "development", req_a)
+            check("_next_unplanned scoped to REQ-A returns REQ-A task",
+                  result_a is not None and result_a["task_id"] == tid_a,
+                  f"got {result_a['task_id'] if result_a else None!r}")
+
+            # _next_unplanned scoped to req_b must return only task_b
+            with transaction() as conn:
+                result_b = director_mod._next_unplanned(conn, "development", req_b)
+            check("_next_unplanned scoped to REQ-B returns REQ-B task",
+                  result_b is not None and result_b["task_id"] == tid_b,
+                  f"got {result_b['task_id'] if result_b else None!r}")
+
+            # _count_active scoped to each request only counts its own task
+            with transaction() as conn:
+                count_a = director_mod._count_active(conn, "development", req_a)
+                count_b = director_mod._count_active(conn, "development", req_b)
+            check("_count_active scoped to REQ-A counts only REQ-A tasks",
+                  count_a == 1, f"count_a={count_a}")
+            check("_count_active scoped to REQ-B counts only REQ-B tasks",
+                  count_b == 1, f"count_b={count_b}")
+
+            # run_domain scoped to nonexistent request never touches REQ-A or REQ-B
+            with transaction() as conn:
+                result = director_mod.run_domain(conn, "development",
+                                                 request_id="REQ-ISO-NONE",
+                                                 max_tasks=1)
+            check("run_domain scoped to nonexistent request: planned=0 (no cross-request work)",
+                  result["planned"] == 0, f"planned={result['planned']}")
+
+        finally:
+            # Clean up test rows regardless of test outcome
+            with transaction() as conn:
+                cur = conn.cursor()
+                cur.execute("DELETE FROM tasks WHERE task_id IN (%s, %s)", (tid_a, tid_b))
+                cur.execute("DELETE FROM requests WHERE request_id IN (%s, %s)", (req_a, req_b))
+
+    except Exception as e:
+        check("28b DB test skipped", False,
+              f"{type(e).__name__}: {str(e)[:120]}")
+
+
 # ── Main ──────────────────────────────────────────────────────────────────
 
 def main() -> int:
@@ -1668,6 +1786,7 @@ def main() -> int:
         test_escalation_delivery_reliability,
         test_director_slo_guardrails,
         test_typed_response_policy,
+        test_request_scope_isolation,
     ]
 
     for t in tests:
