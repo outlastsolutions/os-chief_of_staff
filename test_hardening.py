@@ -928,6 +928,80 @@ def test_stage3_readiness_check():
 
 # ── 19. Director run telemetry ─────────────────────────────────────────────
 
+def test_policy_observability():
+    section("22 — Policy observability: audit trail + reason contract (code inspection)")
+    import inspect
+    import core.director as director_mod
+
+    src_gate  = inspect.getsource(director_mod._check_domain_gating)
+    src_emit  = inspect.getsource(director_mod._emit_policy_audit)
+    src_run   = inspect.getsource(director_mod.run_domain)
+
+    check("POLICY_AUDIT_FILE constant defined",
+          hasattr(director_mod, "POLICY_AUDIT_FILE"), "")
+    check("_emit_policy_audit function defined",
+          "_emit_policy_audit" in src_run, "")
+    check("_emit_policy_audit called on gated path",
+          src_run.count("_emit_policy_audit") >= 2, "expected calls on both gated and normal paths")
+    check("Audit entry includes 'source' field",
+          '"source"' in src_emit or "'source'" in src_emit, "")
+    check("_check_domain_gating normalizes blank reason for non-enabled status",
+          "no reason specified" in src_gate or "no reason" in src_gate, "")
+    check("Normalization is deterministic (produces fixed-format string)",
+          "policy: domain is" in src_gate, "")
+
+    # ── 22b — functional: reason contract + audit file ─────────────────────
+    section("22b — Policy observability: functional (reason contract + audit file)")
+    import os
+    from unittest.mock import patch
+    from pathlib import Path
+
+    # Disabled domain with empty reason → normalized to non-empty
+    with patch.dict(director_mod.DOMAIN_REGISTRY,
+                    {"research": {"status": "disabled", "reason": ""}}):
+        is_gated, gs, gr = director_mod._check_domain_gating("research")
+    check("Blank reason for disabled status is normalized to non-empty string",
+          is_gated and len(gr) > 0, f"is_gated={is_gated} gating_reason={gr!r}")
+    check("Normalized reason contains domain status",
+          "disabled" in gr, f"gating_reason={gr!r}")
+
+    # Read-only with whitespace-only reason → also normalized
+    with patch.dict(director_mod.DOMAIN_REGISTRY,
+                    {"marketing": {"status": "read_only", "reason": "   "}}):
+        _, _, gr2 = director_mod._check_domain_gating("marketing")
+    check("Whitespace-only reason treated as blank and normalized",
+          "read_only" in gr2 or "no reason" in gr2, f"gating_reason={gr2!r}")
+
+    # run_domain on enabled domain produces audit file entry
+    try:
+        from db.connection import transaction
+        audit_file = director_mod.POLICY_AUDIT_FILE
+        lines_before = 0
+        if audit_file.exists():
+            lines_before = sum(1 for _ in open(audit_file))
+
+        with transaction() as conn:
+            director_mod.run_domain(conn, "operations", request_id=None, max_tasks=1)
+
+        check("policy_audit.jsonl exists after run_domain",
+              audit_file.exists(), str(audit_file))
+        if audit_file.exists():
+            lines_after = sum(1 for _ in open(audit_file))
+            check("At least one new audit line appended",
+                  lines_after > lines_before, f"before={lines_before} after={lines_after}")
+            last = json.loads(open(audit_file).readlines()[-1])
+            required = {"domain", "gating_status", "gating_reason", "run_ts", "source"}
+            missing  = required - set(last.keys())
+            check("Audit entry has all required fields",
+                  not missing, f"missing: {missing}")
+            check("Enabled domain audit entry has gating_status=ENABLED",
+                  last.get("gating_status") == "ENABLED",
+                  f"gating_status={last.get('gating_status')!r}")
+    except Exception as e:
+        check("22b DB/file test skipped", False,
+              f"{type(e).__name__}: {str(e)[:120]}")
+
+
 def test_director_rollout_gating():
     section("21 — Director rollout gating: registry + enforcement (code inspection)")
     import inspect
@@ -1145,6 +1219,7 @@ def main() -> int:
         test_director_telemetry,
         test_director_cycle_contract,
         test_director_rollout_gating,
+        test_policy_observability,
     ]
 
     for t in tests:

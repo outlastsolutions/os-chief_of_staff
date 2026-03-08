@@ -20,6 +20,7 @@ import time
 import uuid
 import traceback
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional
 
 from config.settings import (SLACK_TASKS_CHANNEL, DIRECTOR_MODEL,
@@ -36,6 +37,9 @@ from core import auditor as auditor_agent
 
 
 DOMAINS = VALID_DOMAINS  # canonical source is config.settings.VALID_DOMAINS
+
+# Machine-readable policy audit log — one JSON line per director cycle
+POLICY_AUDIT_FILE = Path(__file__).parent.parent / "policy_audit.jsonl"
 
 
 # ── Public interface ───────────────────────────────────────────────────────
@@ -65,6 +69,7 @@ def run_domain(conn, domain: str, request_id: Optional[str] = None,
             "gating_reason": gating_reason,
         }
         print(f"[telemetry] {json.dumps(gated)}")
+        _emit_policy_audit(domain, gating_status, gating_reason, gated["run_ts"])
         return gated
 
     results = {"domain": domain, "planned": 0, "built": 0, "verified": 0,
@@ -148,6 +153,7 @@ def run_domain(conn, domain: str, request_id: Optional[str] = None,
     results["elapsed_s"] = round(time.time() - t0, 2)
     results["run_ts"]    = datetime.now(timezone.utc).isoformat()
     print(f"[telemetry] {json.dumps(results)}")
+    _emit_policy_audit(domain, "ENABLED", "", results["run_ts"])
 
     return results
 
@@ -237,13 +243,37 @@ def _check_domain_gating(domain: str) -> tuple[bool, str, str]:
     Check the DOMAIN_REGISTRY rollout policy for a domain.
     Returns (is_gated, gating_status, gating_reason).
     is_gated=True means the domain must not execute.
+    Non-enabled statuses with a blank reason are normalized to a deterministic default.
     """
     entry  = DOMAIN_REGISTRY.get(domain, {"status": "disabled", "reason": "not in registry"})
     status = entry.get("status", "disabled")
-    reason = entry.get("reason", "")
+    reason = (entry.get("reason") or "").strip()
     if status == "enabled":
         return False, "ENABLED", ""
-    return True, status.upper(), reason or f"domain is {status}"
+    # Enforce non-empty reason for non-enabled statuses
+    if not reason:
+        reason = f"policy: domain is {status} (no reason specified)"
+    return True, status.upper(), reason
+
+
+def _emit_policy_audit(domain: str, gating_status: str,
+                       gating_reason: str, run_ts: str) -> None:
+    """
+    Append one JSON line to the policy audit log for every director cycle.
+    Covers both gated and enabled executions for a complete audit trail.
+    """
+    entry = {
+        "domain":        domain,
+        "gating_status": gating_status,
+        "gating_reason": gating_reason,
+        "run_ts":        run_ts,
+        "source":        "director.run_domain",
+    }
+    try:
+        with open(POLICY_AUDIT_FILE, "a") as fh:
+            fh.write(json.dumps(entry) + "\n")
+    except Exception as e:
+        print(f"  [policy_audit] write failed: {e}")
 
 
 def _collect_typed_failures(conn, domain: str, request_id: Optional[str],
