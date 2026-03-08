@@ -25,7 +25,8 @@ from typing import Optional
 
 from config.settings import (SLACK_TASKS_CHANNEL, DIRECTOR_MODEL,
                              DIRECTOR_APPROVAL_ENABLED, VALID_DOMAINS,
-                             DOMAIN_REGISTRY, DOMAIN_BUDGETS, DOMAIN_SLOS)
+                             DOMAIN_REGISTRY, DOMAIN_BUDGETS, DOMAIN_SLOS,
+                             CYCLE_RESPONSE_POLICY)
 from core.lease import fail_task
 from core.idempotency import enqueue_outbox
 from core.secretary_client import AGENT_IDENTITY
@@ -182,9 +183,8 @@ def run_domain(conn, domain: str, request_id: Optional[str] = None,
     print(f"[telemetry] {json.dumps(results)}")
     _emit_policy_audit(domain, "ENABLED", "", results["run_ts"])
 
-    # Budget-hit escalation — one outbox notification per cycle (idempotent)
-    if results["budget_hit"]:
-        _emit_budget_escalation(conn, results)
+    # Typed response dispatch — bounded, idempotent per cycle identity
+    _execute_cycle_response(conn, results)
 
     return results
 
@@ -586,6 +586,41 @@ def _request_plan_revision(conn, task_id: str, feedback: str) -> None:
             (f"[Director revision requested] {feedback[:400]}", task_id)
         )
         cur.execute("DELETE FROM plans WHERE task_id = %s", (task_id,))
+
+
+def _execute_cycle_response(conn, results: dict) -> None:
+    """
+    Unified typed response dispatcher — called once per cycle after all outcome
+    fields are final. Executes at most one bounded response per active outcome type.
+    Idempotent: dedupe_key = director:cycle_response:{outcome}:{domain}:{run_ts}.
+    Reuses existing outbox/escalation pathways; no new transport types.
+    """
+    domain = results["domain"]
+    run_ts = results["run_ts"]
+
+    # budget_hit → delegate to existing idempotent escalation helper
+    if results.get("budget_hit"):
+        action = CYCLE_RESPONSE_POLICY.get("budget_hit", "observe")
+        if action == "escalate_once":
+            _emit_budget_escalation(conn, results)
+
+    # slo_breach → enqueue one escalation, idempotent per cycle identity
+    if results.get("slo_status") == "BREACH":
+        action = CYCLE_RESPONSE_POLICY.get("slo_breach", "observe")
+        if action == "escalate_once":
+            dedupe_key = f"director:cycle_response:slo_breach:{domain}:{run_ts}"
+            breaches   = results.get("slo_breaches", [])
+            text = (
+                f":warning: *[Director: {domain}] SLO breach*\n"
+                f"Cycle exceeded configured SLO thresholds.\n"
+                f"*Breaches:* {'; '.join(breaches)}\n"
+                f"*Cycle:* {run_ts}"
+            )
+            _enqueue_slack(conn, dedupe_key, text, agent="apm")
+
+    # gating_non_enabled — policy declared; gated cycles return early so this
+    # branch is present for completeness and future wiring.
+    # Default action is "observe" (no outbox side effect).
 
 
 def _emit_budget_escalation(conn, results: dict) -> None:

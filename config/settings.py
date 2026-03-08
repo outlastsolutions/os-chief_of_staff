@@ -63,6 +63,21 @@ DOMAIN_SLOS: dict = {
     "marketing":   {"max_blocked": None, "max_failed": None, "max_elapsed_s": None},
 }
 
+# ── Director cycle typed response policy ──────────────────────────────────
+# Maps typed cycle outcome keys to bounded automatic response actions.
+# Actions:
+#   observe       — log only; no outbox side effect (default safe value)
+#   escalate_once — enqueue one outbox notification, idempotent per cycle identity
+# Outcome keys:
+#   gating_non_enabled — domain is not enabled (read_only / disabled)
+#   budget_hit         — cycle exhausted max_tasks or max_runtime_s
+#   slo_breach         — cycle results exceeded a DOMAIN_SLOS threshold
+CYCLE_RESPONSE_POLICY: dict = {
+    "gating_non_enabled": "observe",
+    "budget_hit":         "escalate_once",
+    "slo_breach":         "escalate_once",
+}
+
 # ── Director approval checkpoint ──────────────────────────────────────────
 # When enabled, the Development Director reviews every plan before Builder
 # claims the task. approve | revise | escalate.

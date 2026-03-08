@@ -1265,10 +1265,11 @@ def test_budget_escalation():
 
     check("_emit_budget_escalation function defined",
           hasattr(director_mod, "_emit_budget_escalation"), "")
-    check("run_domain calls _emit_budget_escalation",
-          "_emit_budget_escalation" in src_run, "")
-    check("_emit_budget_escalation call is conditional on budget_hit",
-          "budget_hit" in src_run and "_emit_budget_escalation" in src_run, "")
+    check("run_domain delegates to _execute_cycle_response (which calls _emit_budget_escalation)",
+          "_execute_cycle_response" in src_run, "")
+    src_resp = inspect.getsource(director_mod._execute_cycle_response)
+    check("_emit_budget_escalation called conditionally on budget_hit inside _execute_cycle_response",
+          "budget_hit" in src_resp and "_emit_budget_escalation" in src_resp, "")
     check("_emit_budget_escalation builds dedupe_key with domain and run_ts",
           "domain" in src_esc and "run_ts" in src_esc and "dedupe_key" in src_esc, "")
     check("_emit_budget_escalation dedupe_key uses budget_escalation namespace",
@@ -1535,6 +1536,99 @@ def test_director_slo_guardrails():
               f"{type(e).__name__}: {str(e)[:120]}")
 
 
+def test_typed_response_policy():
+    section("27 — Typed response policy: map contract (code inspection)")
+    import inspect
+    import core.director as director_mod
+    from config import settings as settings_mod
+
+    policy = getattr(settings_mod, "CYCLE_RESPONSE_POLICY", {})
+    check("CYCLE_RESPONSE_POLICY defined in config.settings",
+          hasattr(settings_mod, "CYCLE_RESPONSE_POLICY"), "")
+    required_keys = {"gating_non_enabled", "budget_hit", "slo_breach"}
+    missing_keys  = required_keys - set(policy.keys())
+    check("CYCLE_RESPONSE_POLICY covers all required outcome keys",
+          not missing_keys, f"missing: {missing_keys}")
+    valid_actions = {"observe", "escalate_once", "cooldown"}
+    invalid = {k: v for k, v in policy.items() if v not in valid_actions}
+    check("All response actions are from the known action set",
+          not invalid, f"unknown actions: {invalid}")
+    check("gating_non_enabled default action is observe (no outbox side effect)",
+          policy.get("gating_non_enabled") == "observe", f"got {policy.get('gating_non_enabled')!r}")
+
+    check("_execute_cycle_response function defined",
+          hasattr(director_mod, "_execute_cycle_response"), "")
+    src_run = inspect.getsource(director_mod.run_domain)
+    check("run_domain calls _execute_cycle_response (not bare _emit_budget_escalation)",
+          "_execute_cycle_response" in src_run, "")
+
+    src_resp = inspect.getsource(director_mod._execute_cycle_response)
+    check("_execute_cycle_response uses CYCLE_RESPONSE_POLICY for action lookup",
+          "CYCLE_RESPONSE_POLICY" in src_resp, "")
+    check("_execute_cycle_response dedupe_key uses cycle_response namespace",
+          "cycle_response" in src_resp, "")
+
+    # ── 27b — functional: non-breach / SLO breach / idempotency ───────────
+    section("27b — Typed response policy: functional (non-breach/breach/idempotency)")
+    from unittest.mock import patch
+
+    try:
+        from db.connection import transaction
+
+        # Non-breach cycle → no slo_breach cycle_response row for this run_ts
+        with transaction() as conn:
+            clean = director_mod.run_domain(conn, "development",
+                                            request_id="REQ-RESP-TEST-NONE",
+                                            max_tasks=1)
+        clean_key = f"director:cycle_response:slo_breach:development:{clean['run_ts']}"
+        with transaction() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT outbox_id FROM outbox WHERE dedupe_key = %s", (clean_key,))
+            clean_row = cur.fetchone()
+        check("Non-breach cycle: no slo_breach cycle_response row in outbox",
+              clean_row is None, f"unexpected row: {clean_row}")
+
+        # SLO breach → slo_breach cycle_response row inserted
+        with patch.dict(director_mod.DOMAIN_SLOS,
+                        {"research": {"max_blocked": None, "max_failed": None,
+                                      "max_elapsed_s": 0}}):
+            with transaction() as conn:
+                breach = director_mod.run_domain(conn, "research",
+                                                 request_id="REQ-RESP-TEST-BREACH",
+                                                 max_tasks=1)
+        breach_key = f"director:cycle_response:slo_breach:research:{breach['run_ts']}"
+        with transaction() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT outbox_id, type FROM outbox WHERE dedupe_key = %s",
+                        (breach_key,))
+            breach_row = cur.fetchone()
+        check("SLO breach cycle: slo_breach cycle_response row inserted in outbox",
+              breach_row is not None, f"expected key={breach_key!r}")
+        check("SLO breach response type is slack_post",
+              breach_row is not None and breach_row["type"] == "slack_post",
+              f"type={breach_row['type'] if breach_row else 'N/A'}")
+
+        # Idempotency: calling _execute_cycle_response again with same results
+        with transaction() as conn:
+            director_mod._execute_cycle_response(conn, breach)
+        with transaction() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT COUNT(*) AS n FROM outbox WHERE dedupe_key = %s",
+                        (breach_key,))
+            count = cur.fetchone()["n"]
+        check("Duplicate _execute_cycle_response for same cycle is a no-op (idempotent)",
+              count == 1, f"outbox row count={count}")
+
+        # Budget-hit still fires via _execute_cycle_response → _emit_budget_escalation
+        check("budget_hit response action is escalate_once",
+              settings_mod.CYCLE_RESPONSE_POLICY.get("budget_hit") == "escalate_once",
+              f"got {settings_mod.CYCLE_RESPONSE_POLICY.get('budget_hit')!r}")
+
+    except Exception as e:
+        check("27b DB test skipped", False,
+              f"{type(e).__name__}: {str(e)[:120]}")
+
+
 # ── Main ──────────────────────────────────────────────────────────────────
 
 def main() -> int:
@@ -1573,6 +1667,7 @@ def main() -> int:
         test_budget_escalation,
         test_escalation_delivery_reliability,
         test_director_slo_guardrails,
+        test_typed_response_policy,
     ]
 
     for t in tests:
