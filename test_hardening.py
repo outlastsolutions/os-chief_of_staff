@@ -879,10 +879,100 @@ def test_proof_run_harness():
           "dry_run" in src and "return 0" in src, "")
 
 
+# ── 18. Stage 3 readiness check ───────────────────────────────────────────
+
+def test_stage3_readiness_check():
+    section("18 — Stage 3 readiness check: structure and fail-fast (code inspection)")
+    import subprocess, os, sys as _sys
+    from pathlib import Path
+
+    script = Path(__file__).parent / "stage3_check.py"
+    check("stage3_check.py exists",
+          script.exists(), str(script))
+    if not script.exists():
+        return
+
+    src = script.read_text()
+
+    check("_check_env function defined",
+          "def _check_env" in src, "")
+    check("_check_db function defined",
+          "def _check_db" in src, "")
+    check("_check_tables function defined",
+          "def _check_tables" in src, "")
+    check("REQUIRED_TABLES includes 'requests'",
+          '"requests"' in src or "'requests'" in src, "")
+    check("REQUIRED_TABLES includes 'director_reports'",
+          '"director_reports"' in src or "'director_reports'" in src, "")
+    check("REQUIRED_TABLES includes 'resource_locks'",
+          '"resource_locks"' in src or "'resource_locks'" in src, "")
+    check("main() returns non-zero on failures (exit 1 path present)",
+          "return 1" in src or "sys.exit(1)" in src or "_failed" in src, "")
+    check("JSON result emitted at end of main()",
+          "json.dumps" in src, "")
+
+    # Functional: subprocess with empty DATABASE_URL and no LLM keys → exit 1
+    env = dict(os.environ)
+    env["DATABASE_URL"] = ""
+    env.pop("GEMINI_API_KEY",    None)
+    env.pop("ANTHROPIC_API_KEY", None)
+    proc = subprocess.run(
+        [_sys.executable, str(script)],
+        env=env, capture_output=True, text=True,
+        cwd=str(script.parent),
+    )
+    check("stage3_check exits non-zero when DATABASE_URL and LLM keys missing",
+          proc.returncode != 0,
+          f"got exit code {proc.returncode}; stdout: {proc.stdout[:200]}")
+
+
+# ── 19. Director run telemetry ─────────────────────────────────────────────
+
+def test_director_telemetry():
+    section("19 — Director run telemetry: payload shape (code inspection + DB)")
+    import inspect
+    import core.director as director_mod
+
+    src = inspect.getsource(director_mod.run_domain)
+
+    check("run_domain tracks elapsed_s",
+          "elapsed_s" in src, "")
+    check("run_domain sets run_ts (ISO timestamp)",
+          "run_ts" in src, "")
+    check("run_domain emits JSON telemetry line (json.dumps)",
+          "json.dumps" in src, "")
+    check("telemetry line uses [telemetry] prefix for grep-ability",
+          "[telemetry]" in src, "")
+
+    # DB functional: run_domain with no tasks returns complete telemetry dict
+    section("19b — Director telemetry: DB functional (dict shape check)")
+    try:
+        from db.connection import transaction
+        with transaction() as conn:
+            result = director_mod.run_domain(conn, "research",
+                                             request_id=None, max_tasks=1)
+
+        required_keys = {"domain", "planned", "built", "verified",
+                         "failed", "blocked", "elapsed_s", "run_ts"}
+        missing = required_keys - set(result.keys())
+        check("run_domain returns dict with all telemetry keys",
+              not missing, f"missing keys: {missing}")
+        check("elapsed_s is a non-negative number",
+              isinstance(result.get("elapsed_s"), (int, float))
+              and result["elapsed_s"] >= 0,
+              f"elapsed_s={result.get('elapsed_s')!r}")
+        check("run_ts is a non-empty string",
+              isinstance(result.get("run_ts"), str) and len(result["run_ts"]) > 0,
+              f"run_ts={result.get('run_ts')!r}")
+    except Exception as e:
+        check("19b DB test skipped",
+              False, f"{type(e).__name__}: {str(e)[:120]}")
+
+
 # ── Main ──────────────────────────────────────────────────────────────────
 
 def main() -> int:
-    print("\n\033[1mOSAIO Hardening Regression — Stage 2.2\033[0m")
+    print("\n\033[1mOSAIO Hardening Regression — Stage 3 Kickoff\033[0m")
     print("=" * 60)
 
     tests = [
@@ -908,6 +998,8 @@ def main() -> int:
         test_outbox_retry_logic,
         test_outbox_retry_functional,
         test_proof_run_harness,
+        test_stage3_readiness_check,
+        test_director_telemetry,
     ]
 
     for t in tests:

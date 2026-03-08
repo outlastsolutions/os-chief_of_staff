@@ -16,8 +16,10 @@ Design:
 
 from __future__ import annotations
 import json
+import time
 import uuid
 import traceback
+from datetime import datetime, timezone
 from typing import Optional
 
 from config.settings import SLACK_TASKS_CHANNEL, DIRECTOR_MODEL, DIRECTOR_APPROVAL_ENABLED, VALID_DOMAINS
@@ -46,6 +48,7 @@ def run_domain(conn, domain: str, request_id: Optional[str] = None,
     if domain not in DOMAINS:
         raise ValueError(f"Unknown domain '{domain}'. Must be one of: {DOMAINS}")
 
+    t0 = time.time()
     results = {"domain": domain, "planned": 0, "built": 0, "verified": 0,
                "failed": 0, "blocked": 0, "skipped": 0}
 
@@ -118,6 +121,11 @@ def run_domain(conn, domain: str, request_id: Optional[str] = None,
     results["blocked"] = len(blocked)
     if blocked:
         _notify_blocked(conn, domain, blocked)
+
+    # Structured telemetry — one JSON line per director cycle
+    results["elapsed_s"] = round(time.time() - t0, 2)
+    results["run_ts"]    = datetime.now(timezone.utc).isoformat()
+    print(f"[telemetry] {json.dumps(results)}")
 
     return results
 
