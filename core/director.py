@@ -25,7 +25,7 @@ from typing import Optional
 
 from config.settings import (SLACK_TASKS_CHANNEL, DIRECTOR_MODEL,
                              DIRECTOR_APPROVAL_ENABLED, VALID_DOMAINS,
-                             DOMAIN_REGISTRY, DOMAIN_BUDGETS)
+                             DOMAIN_REGISTRY, DOMAIN_BUDGETS, DOMAIN_SLOS)
 from core.lease import fail_task
 from core.idempotency import enqueue_outbox
 from core.secretary_client import AGENT_IDENTITY
@@ -67,6 +67,8 @@ def run_domain(conn, domain: str, request_id: Optional[str] = None,
             "run_ts":    datetime.now(timezone.utc).isoformat(),
             "gating_status": gating_status,
             "gating_reason": gating_reason,
+            "slo_status":  "OK",
+            "slo_breaches": [],
         }
         print(f"[telemetry] {json.dumps(gated)}")
         _emit_policy_audit(domain, gating_status, gating_reason, gated["run_ts"])
@@ -171,6 +173,12 @@ def run_domain(conn, domain: str, request_id: Optional[str] = None,
     # Structured telemetry — one JSON line per director cycle
     results["elapsed_s"] = round(time.time() - t0, 2)
     results["run_ts"]    = datetime.now(timezone.utc).isoformat()
+
+    # SLO evaluation — must run after elapsed_s is final
+    slo_status, slo_breaches = _evaluate_slo(domain, results)
+    results["slo_status"]  = slo_status
+    results["slo_breaches"] = slo_breaches
+
     print(f"[telemetry] {json.dumps(results)}")
     _emit_policy_audit(domain, "ENABLED", "", results["run_ts"])
 
@@ -299,6 +307,38 @@ def get_dead_budget_escalations(conn) -> list[dict]:
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────
+
+def _evaluate_slo(domain: str, results: dict) -> tuple[str, list[str]]:
+    """
+    Evaluate cycle results against the domain's SLO policy (DOMAIN_SLOS).
+    Returns (slo_status, slo_breaches):
+      slo_status  — "OK" or "BREACH"
+      slo_breaches — list of human-readable breach descriptions (empty when OK)
+    Pure function — no DB access, no side effects.
+    """
+    slo = DOMAIN_SLOS.get(domain, {})
+    breaches: list[str] = []
+
+    max_blocked = slo.get("max_blocked")
+    if max_blocked is not None and results.get("blocked", 0) > max_blocked:
+        breaches.append(
+            f"blocked={results['blocked']} exceeds max_blocked={max_blocked}"
+        )
+
+    max_failed = slo.get("max_failed")
+    if max_failed is not None and results.get("failed", 0) > max_failed:
+        breaches.append(
+            f"failed={results['failed']} exceeds max_failed={max_failed}"
+        )
+
+    max_elapsed = slo.get("max_elapsed_s")
+    if max_elapsed is not None and results.get("elapsed_s", 0) > max_elapsed:
+        breaches.append(
+            f"elapsed_s={results.get('elapsed_s')} exceeds max_elapsed_s={max_elapsed}"
+        )
+
+    return ("BREACH" if breaches else "OK", breaches)
+
 
 def _check_domain_gating(domain: str) -> tuple[bool, str, str]:
     """

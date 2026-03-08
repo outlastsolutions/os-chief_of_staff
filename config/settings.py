@@ -50,6 +50,19 @@ DOMAIN_BUDGETS: dict = {
     "marketing":   {"max_tasks": None, "max_runtime_s": None},
 }
 
+# ── Director cycle SLO guardrails ─────────────────────────────────────────
+# Per-domain thresholds evaluated after each run_domain() cycle.
+# max_blocked:   max tolerated blocked task count before SLO breach
+# max_failed:    max tolerated failed task count before SLO breach
+# max_elapsed_s: max tolerated wall-clock seconds before SLO breach
+# None = no threshold on that dimension (never breaches — backward-compatible default)
+DOMAIN_SLOS: dict = {
+    "development": {"max_blocked": None, "max_failed": None, "max_elapsed_s": None},
+    "operations":  {"max_blocked": None, "max_failed": None, "max_elapsed_s": None},
+    "research":    {"max_blocked": None, "max_failed": None, "max_elapsed_s": None},
+    "marketing":   {"max_blocked": None, "max_failed": None, "max_elapsed_s": None},
+}
+
 # ── Director approval checkpoint ──────────────────────────────────────────
 # When enabled, the Development Director reviews every plan before Builder
 # claims the task. approve | revise | escalate.

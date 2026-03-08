@@ -1437,6 +1437,104 @@ def test_escalation_delivery_reliability():
               f"{type(e).__name__}: {str(e)[:120]}")
 
 
+def test_director_slo_guardrails():
+    section("26 — Director cycle SLO guardrails: policy + typed outcomes (code inspection)")
+    import inspect
+    import core.director as director_mod
+    from config import settings as settings_mod
+    from config.settings import VALID_DOMAINS
+
+    check("DOMAIN_SLOS defined in config.settings",
+          hasattr(settings_mod, "DOMAIN_SLOS"), "")
+    budgets = getattr(settings_mod, "DOMAIN_SLOS", {})
+    missing = [d for d in VALID_DOMAINS if d not in budgets]
+    check("DOMAIN_SLOS covers all VALID_DOMAINS",
+          not missing, f"missing: {missing}")
+    check("All current domains default to None SLO thresholds (backward-compatible)",
+          all(
+              v.get("max_blocked") is None
+              and v.get("max_failed") is None
+              and v.get("max_elapsed_s") is None
+              for v in budgets.values()
+          ), f"non-None: {[(k,v) for k,v in budgets.items() if any(x is not None for x in v.values())]}")
+
+    check("_evaluate_slo function defined",
+          hasattr(director_mod, "_evaluate_slo"), "")
+    src_run = inspect.getsource(director_mod.run_domain)
+    check("run_domain calls _evaluate_slo",
+          "_evaluate_slo" in src_run, "")
+    check("slo_status and slo_breaches present in run_domain results",
+          '"slo_status"' in src_run and '"slo_breaches"' in src_run, "")
+
+    # ── 26b — functional: pure-function unit tests + DB ───────────────────
+    section("26b — Director cycle SLO guardrails: functional (pure-function + DB)")
+    from unittest.mock import patch
+
+    # Pure-function: default (all None) → OK
+    clean_results = {"blocked": 0, "failed": 0, "elapsed_s": 0.5}
+    status, breaches = director_mod._evaluate_slo("development", clean_results)
+    check("Default SLO (all None): slo_status=OK",
+          status == "OK", f"got {status!r}")
+    check("Default SLO (all None): slo_breaches=[]",
+          breaches == [], f"got {breaches}")
+
+    # Pure-function: blocked breach
+    with patch.dict(director_mod.DOMAIN_SLOS,
+                    {"development": {"max_blocked": 1, "max_failed": None, "max_elapsed_s": None}}):
+        s, b = director_mod._evaluate_slo("development", {"blocked": 2, "failed": 0, "elapsed_s": 0.1})
+    check("Blocked count exceeds max_blocked → BREACH",
+          s == "BREACH", f"got {s!r}")
+    check("Blocked breach description mentions 'blocked'",
+          any("blocked" in msg for msg in b), f"breaches={b}")
+
+    # Pure-function: failed breach
+    with patch.dict(director_mod.DOMAIN_SLOS,
+                    {"development": {"max_blocked": None, "max_failed": 0, "max_elapsed_s": None}}):
+        s2, b2 = director_mod._evaluate_slo("development", {"blocked": 0, "failed": 1, "elapsed_s": 0.1})
+    check("Failed count exceeds max_failed → BREACH",
+          s2 == "BREACH", f"got {s2!r}")
+
+    # Pure-function: elapsed breach
+    with patch.dict(director_mod.DOMAIN_SLOS,
+                    {"development": {"max_blocked": None, "max_failed": None, "max_elapsed_s": 1.0}}):
+        s3, b3 = director_mod._evaluate_slo("development", {"blocked": 0, "failed": 0, "elapsed_s": 2.5})
+    check("elapsed_s exceeds max_elapsed_s → BREACH",
+          s3 == "BREACH", f"got {s3!r}")
+
+    # DB functional: default SLO, scoped to nonexistent request → slo_status=OK
+    try:
+        from db.connection import transaction
+        with transaction() as conn:
+            result = director_mod.run_domain(conn, "research",
+                                             request_id="REQ-SLO-TEST-NONE",
+                                             max_tasks=1)
+        check("run_domain default SLO: slo_status=OK",
+              result.get("slo_status") == "OK",
+              f"slo_status={result.get('slo_status')!r}")
+        check("run_domain default SLO: slo_breaches=[]",
+              result.get("slo_breaches") == [],
+              f"slo_breaches={result.get('slo_breaches')!r}")
+
+        # DB functional: elapsed breach via patched max_elapsed_s=0
+        with patch.dict(director_mod.DOMAIN_SLOS,
+                        {"marketing": {"max_blocked": None, "max_failed": None, "max_elapsed_s": 0}}):
+            with transaction() as conn:
+                result2 = director_mod.run_domain(conn, "marketing",
+                                                  request_id="REQ-SLO-TEST-ELAPSED",
+                                                  max_tasks=1)
+        check("run_domain with max_elapsed_s=0: slo_status=BREACH",
+              result2.get("slo_status") == "BREACH",
+              f"slo_status={result2.get('slo_status')!r}")
+        check("run_domain BREACH: slo_breaches is non-empty list",
+              isinstance(result2.get("slo_breaches"), list)
+              and len(result2["slo_breaches"]) > 0,
+              f"slo_breaches={result2.get('slo_breaches')!r}")
+
+    except Exception as e:
+        check("26b DB test skipped", False,
+              f"{type(e).__name__}: {str(e)[:120]}")
+
+
 # ── Main ──────────────────────────────────────────────────────────────────
 
 def main() -> int:
@@ -1474,6 +1572,7 @@ def main() -> int:
         test_director_execution_budgets,
         test_budget_escalation,
         test_escalation_delivery_reliability,
+        test_director_slo_guardrails,
     ]
 
     for t in tests:
