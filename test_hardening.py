@@ -595,6 +595,8 @@ def test_dependency_gating_functional():
     finally:
         with transaction() as conn:
             cur = conn.cursor()
+            # Clear plan_id FK before deleting plans (tasks.plan_id references plans)
+            cur.execute("UPDATE tasks SET plan_id = NULL WHERE request_id = %s", (rid,))
             cur.execute("DELETE FROM plans     WHERE task_id   = %s", (t_tgt,))
             cur.execute("DELETE FROM agent_logs WHERE request_id = %s", (rid,))
             cur.execute("DELETE FROM tasks     WHERE request_id = %s", (rid,))
@@ -839,6 +841,38 @@ def test_outbox_retry_functional():
                     (oid_transient, oid_poison))
 
 
+# ── 17. Stage 1 proof-run harness regression guard ────────────────────────
+
+def test_proof_run_harness():
+    section("17 — Stage 1 proof-run harness: config and gate criteria")
+    from pathlib import Path
+
+    harness = Path(__file__).parent / "proof_run.py"
+    check("proof_run.py exists in chief_of_staff directory",
+          harness.exists(), str(harness))
+    if not harness.exists():
+        return
+
+    src = harness.read_text()
+
+    check("PROOF_RUNS = 10 (gate requires exactly 10 runs)",
+          "PROOF_RUNS = 10" in src, "")
+    check("Gate requires ALL runs to pass (passed == PROOF_RUNS)",
+          "passed == PROOF_RUNS" in src, "")
+    check("Non-PASS run aborts immediately (fail-fast)",
+          "Aborting" in src, "")
+    check("JSON evidence artifact written on every run",
+          "json.dump" in src, "")
+    check("gate_result set to FAIL when passed < PROOF_RUNS",
+          '"FAIL"' in src, "")
+    check("INCOMPLETE counted as non-PASS (partial pipeline = failure)",
+          '"INCOMPLETE"' in src, "")
+    check("FAIL_STATUSES includes 'blocked' (no silent blocking)",
+          '"blocked"' in src or "'blocked'" in src, "")
+    check("--dry-run mode exits cleanly without DB/LLM calls",
+          "dry_run" in src and "return 0" in src, "")
+
+
 # ── Main ──────────────────────────────────────────────────────────────────
 
 def main() -> int:
@@ -867,6 +901,7 @@ def main() -> int:
         test_push_workspace_bounds_functional,
         test_outbox_retry_logic,
         test_outbox_retry_functional,
+        test_proof_run_harness,
     ]
 
     for t in tests:
