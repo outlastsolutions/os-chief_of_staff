@@ -1255,6 +1255,103 @@ def test_director_telemetry():
               False, f"{type(e).__name__}: {str(e)[:120]}")
 
 
+def test_budget_escalation():
+    section("24 — Budget escalation signaling: emission contract (code inspection)")
+    import inspect
+    import core.director as director_mod
+
+    src_run  = inspect.getsource(director_mod.run_domain)
+    src_esc  = inspect.getsource(director_mod._emit_budget_escalation)
+
+    check("_emit_budget_escalation function defined",
+          hasattr(director_mod, "_emit_budget_escalation"), "")
+    check("run_domain calls _emit_budget_escalation",
+          "_emit_budget_escalation" in src_run, "")
+    check("_emit_budget_escalation call is conditional on budget_hit",
+          "budget_hit" in src_run and "_emit_budget_escalation" in src_run, "")
+    check("_emit_budget_escalation builds dedupe_key with domain and run_ts",
+          "domain" in src_esc and "run_ts" in src_esc and "dedupe_key" in src_esc, "")
+    check("_emit_budget_escalation dedupe_key uses budget_escalation namespace",
+          "budget_escalation" in src_esc, "")
+    check("_emit_budget_escalation includes budget_limit in payload",
+          "budget_limit" in src_esc or "limits" in src_esc, "")
+    check("_emit_budget_escalation routes through _enqueue_slack (outbox pathway)",
+          "_enqueue_slack" in src_esc, "")
+
+    # ── 24b — functional: enqueue / no-enqueue / idempotency ───────────────
+    section("24b — Budget escalation signaling: functional (enqueue/idempotency)")
+    from unittest.mock import patch
+
+    try:
+        from db.connection import transaction
+        from core.idempotency import enqueue_outbox
+
+        # Budget-hit run → escalation row in outbox
+        with patch.dict(director_mod.DOMAIN_BUDGETS,
+                        {"operations": {"max_tasks": 10, "max_runtime_s": 0}}):
+            with transaction() as conn:
+                result_hit = director_mod.run_domain(conn, "operations",
+                                                     request_id=None, max_tasks=10)
+
+        run_ts_hit = result_hit["run_ts"]
+        expected_key = f"director:budget_escalation:operations:{run_ts_hit}"
+
+        with transaction() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT outbox_id, dedupe_key, type FROM outbox WHERE dedupe_key = %s",
+                (expected_key,)
+            )
+            row = cur.fetchone()
+
+        check("Budget-hit cycle inserts escalation row in outbox",
+              row is not None, f"expected key={expected_key!r}")
+        check("Outbox row type is slack_post",
+              row is not None and row["type"] == "slack_post",
+              f"type={row['type'] if row else 'N/A'}")
+
+        # Non-budget-hit run → no escalation row for that cycle
+        with transaction() as conn:
+            result_clean = director_mod.run_domain(conn, "development",
+                                                   request_id="REQ-ESC-TEST-NONE",
+                                                   max_tasks=1)
+
+        run_ts_clean = result_clean["run_ts"]
+        clean_key = f"director:budget_escalation:development:{run_ts_clean}"
+
+        with transaction() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT outbox_id FROM outbox WHERE dedupe_key = %s",
+                (clean_key,)
+            )
+            clean_row = cur.fetchone()
+
+        check("Non-budget-hit cycle does not insert escalation row",
+              clean_row is None,
+              f"unexpected row for clean cycle: {clean_row}")
+
+        # Idempotency: calling _emit_budget_escalation twice with the same results
+        # must not insert a second outbox row
+        with transaction() as conn:
+            director_mod._emit_budget_escalation(conn, result_hit)
+
+        with transaction() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT COUNT(*) AS n FROM outbox WHERE dedupe_key = %s",
+                (expected_key,)
+            )
+            count = cur.fetchone()["n"]
+
+        check("Duplicate _emit_budget_escalation call for same cycle is a no-op",
+              count == 1, f"outbox row count for key={count}")
+
+    except Exception as e:
+        check("24b DB test skipped", False,
+              f"{type(e).__name__}: {str(e)[:120]}")
+
+
 # ── Main ──────────────────────────────────────────────────────────────────
 
 def main() -> int:
@@ -1290,6 +1387,7 @@ def main() -> int:
         test_director_rollout_gating,
         test_policy_observability,
         test_director_execution_budgets,
+        test_budget_escalation,
     ]
 
     for t in tests:

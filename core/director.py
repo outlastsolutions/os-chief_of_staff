@@ -174,6 +174,10 @@ def run_domain(conn, domain: str, request_id: Optional[str] = None,
     print(f"[telemetry] {json.dumps(results)}")
     _emit_policy_audit(domain, "ENABLED", "", results["run_ts"])
 
+    # Budget-hit escalation — one outbox notification per cycle (idempotent)
+    if results["budget_hit"]:
+        _emit_budget_escalation(conn, results)
+
     return results
 
 
@@ -503,6 +507,31 @@ def _request_plan_revision(conn, task_id: str, feedback: str) -> None:
             (f"[Director revision requested] {feedback[:400]}", task_id)
         )
         cur.execute("DELETE FROM plans WHERE task_id = %s", (task_id,))
+
+
+def _emit_budget_escalation(conn, results: dict) -> None:
+    """
+    Enqueue one Slack escalation when a director cycle hits a budget limit.
+    Idempotent: dedupe_key includes domain + run_ts so the same cycle cannot
+    enqueue a second notification even if called more than once.
+    """
+    domain  = results["domain"]
+    limits  = results["budget_limit"]
+    run_ts  = results["run_ts"]
+    elapsed = results.get("elapsed_s", 0)
+    dedupe_key = f"director:budget_escalation:{domain}:{run_ts}"
+    text = (
+        f":alarm_clock: *[Director: {domain}] Budget limit reached*\n"
+        f"Cycle stopped early — execution budget exhausted.\n"
+        f"*Limits:* max_tasks={limits.get('max_tasks')} | "
+        f"max_runtime_s={limits.get('max_runtime_s')}\n"
+        f"*Elapsed:* {elapsed}s | *Cycle:* {run_ts}\n"
+        f"*Work done:* planned={results.get('planned', 0)} "
+        f"built={results.get('built', 0)} "
+        f"verified={results.get('verified', 0)} "
+        f"failed={results.get('failed', 0)}"
+    )
+    _enqueue_slack(conn, dedupe_key, text, agent="apm")
 
 
 def _enqueue_slack(conn, dedupe_key: str, text: str, agent: str = "apm") -> None:
