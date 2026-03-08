@@ -25,6 +25,19 @@ DIRECTOR_MODEL  = os.getenv("DIRECTOR_MODEL",  "gemini-2.5-flash")
 # All domain references in PM/APM prompts, Director, and CLIs derive from this.
 VALID_DOMAINS: tuple[str, ...] = ("development", "operations", "research", "marketing")
 
+# ── Director domain rollout registry ──────────────────────────────────────
+# Per-domain execution eligibility. Enforced by run_domain() and director CLI.
+# status values:
+#   enabled   — normal autonomous execution
+#   read_only — domain tasks can be queried/reported but not executed (maintenance)
+#   disabled  — domain is not activated for autonomous execution
+DOMAIN_REGISTRY: dict = {
+    "development": {"status": "enabled",  "reason": ""},
+    "operations":  {"status": "enabled",  "reason": ""},
+    "research":    {"status": "enabled",  "reason": ""},
+    "marketing":   {"status": "enabled",  "reason": ""},
+}
+
 # ── Director approval checkpoint ──────────────────────────────────────────
 # When enabled, the Development Director reviews every plan before Builder
 # claims the task. approve | revise | escalate.

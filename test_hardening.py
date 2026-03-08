@@ -928,6 +928,93 @@ def test_stage3_readiness_check():
 
 # ── 19. Director run telemetry ─────────────────────────────────────────────
 
+def test_director_rollout_gating():
+    section("21 — Director rollout gating: registry + enforcement (code inspection)")
+    import inspect
+    import core.director as director_mod
+    from config import settings as settings_mod
+
+    # Registry in settings
+    check("DOMAIN_REGISTRY defined in config.settings",
+          hasattr(settings_mod, "DOMAIN_REGISTRY"), "")
+    registry = getattr(settings_mod, "DOMAIN_REGISTRY", {})
+    from config.settings import VALID_DOMAINS
+    missing = [d for d in VALID_DOMAINS if d not in registry]
+    check("DOMAIN_REGISTRY covers all VALID_DOMAINS",
+          not missing, f"missing: {missing}")
+    non_enabled = [d for d, v in registry.items() if v.get("status") != "enabled"]
+    check("All current domains default to enabled",
+          not non_enabled, f"non-enabled: {non_enabled}")
+
+    src_run   = inspect.getsource(director_mod.run_domain)
+    src_gate  = inspect.getsource(director_mod._check_domain_gating)
+
+    check("run_domain calls _check_domain_gating before execution",
+          "_check_domain_gating" in src_run, "")
+    check("Gated early return includes gating_status field",
+          "gating_status" in src_run, "")
+    check("_check_domain_gating returns ENABLED for enabled status",
+          '"ENABLED"' in src_gate or "'ENABLED'" in src_gate, "")
+    check("_check_domain_gating uses DOMAIN_REGISTRY",
+          "DOMAIN_REGISTRY" in src_gate, "")
+
+    # CLI enforcement
+    import director_cli as cli_mod
+    src_cli_run     = inspect.getsource(cli_mod.cmd_run)
+    src_cli_run_all = inspect.getsource(cli_mod.cmd_run_all)
+    src_cli_print   = inspect.getsource(cli_mod._print_results)
+
+    check("cmd_run exits non-zero when gating_status != ENABLED",
+          "gating_status" in src_cli_run and "sys.exit" in src_cli_run, "")
+    check("cmd_run_all exits non-zero when any domain is gated",
+          "gating_status" in src_cli_run_all and "sys.exit" in src_cli_run_all, "")
+    check("_print_results surfaces GATED status (not silently omitted)",
+          "GATED" in src_cli_print or "gating_status" in src_cli_print, "")
+
+    # ── 21b — functional: gating enforcement ──────────────────────────────
+    section("21b — Director rollout gating: functional enforcement")
+    from unittest.mock import patch
+
+    # Enabled domain (DB) → gating_status=ENABLED
+    try:
+        from db.connection import transaction
+        with transaction() as conn:
+            result = director_mod.run_domain(conn, "operations",
+                                             request_id=None, max_tasks=1)
+        check("Enabled domain returns gating_status=ENABLED",
+              result.get("gating_status") == "ENABLED",
+              f"got {result.get('gating_status')!r}")
+    except Exception as e:
+        check("21b DB test skipped", False,
+              f"{type(e).__name__}: {str(e)[:80]}")
+
+    # Patched disabled domain → early return, no execution
+    with patch.dict(director_mod.DOMAIN_REGISTRY,
+                    {"research": {"status": "disabled", "reason": "policy: not yet active"}}):
+        with transaction() as conn:
+            gated = director_mod.run_domain(conn, "research",
+                                            request_id=None, max_tasks=1)
+    check("Disabled domain returns gating_status=DISABLED",
+          gated.get("gating_status") == "DISABLED",
+          f"got {gated.get('gating_status')!r}")
+    check("Disabled domain result has all counters at zero",
+          all(gated.get(k) == 0 for k in ("planned", "built", "verified", "failed")),
+          f"counters={gated}")
+    check("Disabled domain result includes gating_reason",
+          "not yet active" in gated.get("gating_reason", ""),
+          f"gating_reason={gated.get('gating_reason')!r}")
+
+    # Patched read_only domain → gating_status=READ_ONLY
+    with patch.dict(director_mod.DOMAIN_REGISTRY,
+                    {"marketing": {"status": "read_only", "reason": "maintenance window"}}):
+        with transaction() as conn:
+            ro = director_mod.run_domain(conn, "marketing",
+                                         request_id=None, max_tasks=1)
+    check("Read-only domain returns gating_status=READ_ONLY",
+          ro.get("gating_status") == "READ_ONLY",
+          f"got {ro.get('gating_status')!r}")
+
+
 def test_director_cycle_contract():
     section("20 — Director cycle contract: typed failures + report consistency (code inspection)")
     import inspect
@@ -1057,6 +1144,7 @@ def main() -> int:
         test_stage3_readiness_check,
         test_director_telemetry,
         test_director_cycle_contract,
+        test_director_rollout_gating,
     ]
 
     for t in tests:

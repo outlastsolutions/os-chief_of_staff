@@ -35,15 +35,22 @@ def cmd_run(domain: str, request_id: str = None):
     with transaction() as conn:
         results = run_domain(conn, domain, request_id=request_id)
     _print_results(domain, results)
+    if results.get("gating_status", "ENABLED") != "ENABLED":
+        sys.exit(1)
 
 
 def cmd_run_all(request_id: str = None):
     print(f"\n{BOLD}Running all directors{RESET}"
           + (f" for {request_id}" if request_id else "") + "...\n")
+    any_gated = False
     for domain in DOMAINS:
         with transaction() as conn:
             results = run_domain(conn, domain, request_id=request_id, max_tasks=3)
         _print_results(domain, results)
+        if results.get("gating_status", "ENABLED") != "ENABLED":
+            any_gated = True
+    if any_gated:
+        sys.exit(1)
 
 
 def cmd_status(domain: str, request_id: str = None):
@@ -68,6 +75,12 @@ def cmd_report(domain: str, request_id: str):
 
 
 def _print_results(domain: str, results: dict):
+    gating = results.get("gating_status", "ENABLED")
+    if gating != "ENABLED":
+        reason = results.get("gating_reason", "")
+        print(f"  {YELLOW}[{domain}] GATED [{gating}]{RESET}"
+              + (f": {reason}" if reason else ""))
+        return
     color = GREEN if results["failed"] == 0 and results["blocked"] == 0 else YELLOW
     print(f"  {color}[{domain}]{RESET}  "
           f"planned={results['planned']}  "

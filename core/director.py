@@ -22,7 +22,9 @@ import traceback
 from datetime import datetime, timezone
 from typing import Optional
 
-from config.settings import SLACK_TASKS_CHANNEL, DIRECTOR_MODEL, DIRECTOR_APPROVAL_ENABLED, VALID_DOMAINS
+from config.settings import (SLACK_TASKS_CHANNEL, DIRECTOR_MODEL,
+                             DIRECTOR_APPROVAL_ENABLED, VALID_DOMAINS,
+                             DOMAIN_REGISTRY)
 from core.lease import fail_task
 from core.idempotency import enqueue_outbox
 from core.secretary_client import AGENT_IDENTITY
@@ -49,8 +51,25 @@ def run_domain(conn, domain: str, request_id: Optional[str] = None,
         raise ValueError(f"Unknown domain '{domain}'. Must be one of: {DOMAINS}")
 
     t0 = time.time()
+
+    # Enforce domain rollout gating before touching the DB
+    is_gated, gating_status, gating_reason = _check_domain_gating(domain)
+    if is_gated:
+        print(f"  [director:{domain}] gated [{gating_status}]: {gating_reason}")
+        gated = {
+            "domain": domain, "planned": 0, "built": 0, "verified": 0,
+            "failed": 0, "blocked": 0, "skipped": 0, "typed_failures": {},
+            "elapsed_s": round(time.time() - t0, 3),
+            "run_ts":    datetime.now(timezone.utc).isoformat(),
+            "gating_status": gating_status,
+            "gating_reason": gating_reason,
+        }
+        print(f"[telemetry] {json.dumps(gated)}")
+        return gated
+
     results = {"domain": domain, "planned": 0, "built": 0, "verified": 0,
-               "failed": 0, "blocked": 0, "skipped": 0, "typed_failures": {}}
+               "failed": 0, "blocked": 0, "skipped": 0, "typed_failures": {},
+               "gating_status": "ENABLED", "gating_reason": ""}
 
     for _ in range(max_tasks):
         # 1. Plan the next unplanned task
@@ -212,6 +231,20 @@ def generate_director_report(conn, domain: str, request_id: str) -> dict:
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────
+
+def _check_domain_gating(domain: str) -> tuple[bool, str, str]:
+    """
+    Check the DOMAIN_REGISTRY rollout policy for a domain.
+    Returns (is_gated, gating_status, gating_reason).
+    is_gated=True means the domain must not execute.
+    """
+    entry  = DOMAIN_REGISTRY.get(domain, {"status": "disabled", "reason": "not in registry"})
+    status = entry.get("status", "disabled")
+    reason = entry.get("reason", "")
+    if status == "enabled":
+        return False, "ENABLED", ""
+    return True, status.upper(), reason or f"domain is {status}"
+
 
 def _collect_typed_failures(conn, domain: str, request_id: Optional[str],
                             since_epoch: float) -> dict:
